@@ -1,8 +1,125 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "react-grid-layout/css/styles.css";
+@import "react-resizable/css/styles.css";
 
 @custom-variant dark (&:is(.dark *));
+
+/* ── myBudget design tokens ─────────────────────────────── */
+:root {
+  --bg:        #f4f4f6;
+  --panel:     #ffffff;
+  --card-alt:  #f9f9fb;
+  --border-2:  #ebebf0;
+  --text-1:    #111114;
+  --text-2:    #6b6b76;
+  --text-3:    #afafba;
+  --accent:    #5b57f5;
+  --green:     #18c97d;
+  --red:       #f2463a;
+  --amber:     #f5a200;
+}
+
+html.dark {
+  --bg:        #0d0d0f;
+  --panel:     #111113;
+  --card-alt:  #1d1d20;
+  --border-2:  rgba(255,255,255,0.04);
+  --text-1:    #f0f0f3;
+  --text-2:    #7a7a85;
+  --text-3:    #3c3c46;
+}
+
+/* ── Base overrides ─────────────────────────────────────── */
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text-1);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* ── Reusable classes ───────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.card-alt {
+  background: var(--card-alt);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
+/* ── Progress bar ───────────────────────────────────────── */
+@keyframes barGrow {
+  from { width: 0 }
+  to   { width: var(--to) }
+}
+.bar-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  animation: barGrow 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ── Form inputs ────────────────────────────────────────── */
+input, select, textarea {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-1);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input::placeholder, textarea::placeholder { color: var(--text-3); }
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+input[type=number] { -moz-appearance: textfield; }
+input[type=date]::-webkit-calendar-picker-indicator { opacity: 0.35; cursor: pointer; }
+html.dark input[type=date]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.4; }
+
+/* ── Buttons ────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: inherit; font-size: 13px; font-weight: 500;
+  padding: 7px 13px; border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card); color: var(--text-2);
+  cursor: pointer; transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--card-alt); color: var(--text-1); }
+.btn-primary {
+  background: var(--accent); color: #fff; border-color: transparent;
+}
+.btn-primary:hover { opacity: 0.88; background: var(--accent); color: #fff; }
+
+/* ── react-grid-layout ──────────────────────────────────── */
+.react-grid-item.react-grid-placeholder { background: var(--accent); opacity: 0.12; border-radius: 12px; }
+.react-resizable-handle { opacity: 0.3; }
+.react-resizable-handle:hover { opacity: 0.7; }
 
 @theme inline {
   --color-background: var(--background);
