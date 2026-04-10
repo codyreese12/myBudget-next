@@ -279,8 +279,8 @@ function InlineCatPopover({ pos, tx, categories, onSelect, onClose }: { pos: DOM
 }
 
 // ── Detail slide-in panel ──────────────────────────────────────────────────────
-function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags }: {
-  tx: Transaction; categories: Category[];
+function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged }: {
+  tx: Transaction; categories: Category[]; allTxs: Transaction[];
   onEdit: (id: string, u: Partial<Transaction>) => void;
   onDelete: (id: string) => void;
   onExclude: (id: string, excluded: boolean) => void;
@@ -288,6 +288,7 @@ function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onC
   onClose: () => void;
   userTags: string[];
   onUpdateUserTags: (tags: string[]) => void;
+  onCategoryChanged?: (desc: string, cat: string) => void;
 }) {
   const [visible,   setVisible]   = useState(false);
   const [cat,       setCat]       = useState(tx.category);
@@ -308,6 +309,14 @@ function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onC
   const catColor    = getCategoryColor(cat, categories);
   const needsReview = tx.needsReview && !tx.reviewed;
 
+  const fuzzyMatch = tx.isDuplicate ? allTxs.find((e) => {
+    if (e.id === tx.id || e.isDuplicate) return false;
+    const sameDesc = (e.description ?? '').toLowerCase().trim() === (tx.description ?? '').toLowerCase().trim();
+    const sameAmt  = Math.round(Math.abs(e.amount) * 100) === Math.round(Math.abs(tx.amount) * 100);
+    if (!sameDesc || !sameAmt) return false;
+    return Math.abs(new Date(e.date + 'T00:00:00').getTime() - new Date(tx.date + 'T00:00:00').getTime()) <= 2 * 24 * 60 * 60 * 1000;
+  }) : null;
+
   const addTag = (raw: string) => {
     const t = raw.trim().toLowerCase().replace(/\s+/g, '-');
     if (!t || tags.includes(t)) return;
@@ -322,7 +331,12 @@ function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onC
     onEdit(tx.id, { tags: next });
   };
 
-  const save = () => { onEdit(tx.id, { category: cat, notes, tags, needsReview: false }); onClose(); };
+  const save = () => {
+    const catChanged = cat !== tx.category;
+    onEdit(tx.id, { category: cat, notes, tags, needsReview: false });
+    if (catChanged) onCategoryChanged?.(tx.description, cat);
+    onClose();
+  };
   const markReviewed = () => { onEdit(tx.id, { reviewed: true, needsReview: false }); onClose(); };
   const del  = () => { onDelete(tx.id); onClose(); };
 
@@ -364,6 +378,16 @@ function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onC
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {tx.isDuplicate && (
+            <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(245,162,0,0.08)', border: '1px solid rgba(245,162,0,0.25)', fontSize: 12, color: 'var(--amber)', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+              <span>⚠ Possible duplicate</span>
+              {fuzzyMatch && <span style={{ color: 'var(--text-2)' }}>of {new Date(fuzzyMatch.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+              <button onClick={() => onEdit(tx.id, { isDuplicate: false, needsReview: false })}
+                style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-3)', background: 'none', border: '1px solid var(--border)', borderRadius: 5, padding: '2px 7px', cursor: 'pointer' }}>
+                Keep anyway
+              </button>
+            </div>
+          )}
           {needsReview && (
             <button onClick={markReviewed} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%', height: 34, fontSize: 12, fontWeight: 500, color: 'var(--green)', background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 7, cursor: 'pointer' }}>
               <Icon d={IC.check} size={11} /> Mark as reviewed
@@ -471,7 +495,7 @@ function DetailPanel({ tx, categories, onEdit, onDelete, onExclude, onSplit, onC
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule } = useBudget();
 
   const [showAdd,         setShowAdd]         = useState(false);
   const [selectedId,      setSelectedId]      = useState<string | null>(null);
@@ -489,6 +513,13 @@ export default function Transactions() {
   const [tagFilterRect,   setTagFilterRect]   = useState<DOMRect | null>(null);
   const [inlineCat,       setInlineCat]       = useState<{txId: string; pos: DOMRect} | null>(null);
   const [userTags,        setUserTags]        = useState<string[]>([]);
+  const [selectedIds,     setSelectedIds]     = useState(new Set<string>());
+  const [hoveredRowId,    setHoveredRowId]    = useState<string | null>(null);
+  const [bulkCatOpen,     setBulkCatOpen]     = useState(false);
+  const [bulkTagOpen,     setBulkTagOpen]     = useState(false);
+  const [bulkTagValue,    setBulkTagValue]    = useState('');
+  const [deleteConfirm,   setDeleteConfirm]   = useState(false);
+  const [merchantPrompt,  setMerchantPrompt]  = useState<{ descs: string[]; cat: string } | null>(null);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
 
@@ -543,6 +574,9 @@ export default function Transactions() {
     groups[tx.date].push(tx);
   }
 
+  const anySelected = selectedIds.size > 0;
+  const allVisibleSelected = sorted.length > 0 && sorted.every((t) => selectedIds.has(t.id));
+
   const income = sorted.filter((t) => !t.excluded && catType(t.category, categories) === 'income').reduce((s, t) => s + Math.abs(t.amount), 0);
   const spent  = sorted.filter((t) => !t.excluded && catType(t.category, categories) === 'expense').reduce((s, t) => s + Math.abs(t.amount), 0);
   const daySpent = (dateKey: string) => (groups[dateKey] ?? []).reduce((sum, t) => sum + (!t.excluded && catType(t.category, categories) === 'expense' ? Math.abs(t.amount) : 0), 0);
@@ -563,13 +597,16 @@ export default function Transactions() {
     if (!file) return;
     setNotice(null);
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
         const parsed = importCSV(ev.target!.result as string, categories);
         if (!parsed.length) { setNotice({ ok: false, msg: 'No valid transactions found.' }); return; }
-        void importTxs(parsed);
-        setNotice({ ok: true, msg: `Imported ${parsed.length} transaction${parsed.length !== 1 ? 's' : ''}.` });
-        setTimeout(() => setNotice(null), 4000);
+        const stats = await importTxs(parsed);
+        let msg = `Imported ${stats.imported} transaction${stats.imported !== 1 ? 's' : ''}.`;
+        if (stats.exactDups > 0) msg += ` ${stats.exactDups} duplicate${stats.exactDups !== 1 ? 's' : ''} skipped.`;
+        if (stats.fuzzyDups > 0) msg += ` ${stats.fuzzyDups} possible duplicate${stats.fuzzyDups !== 1 ? 's' : ''} flagged for review.`;
+        setNotice({ ok: true, msg });
+        setTimeout(() => setNotice(null), 5000);
       } catch (err) {
         setNotice({ ok: false, msg: (err as Error).message || 'Failed to parse CSV.' });
       }
@@ -584,6 +621,45 @@ export default function Transactions() {
     if (inlineCat?.txId === tx.id) { setInlineCat(null); return; }
     setInlineCat({ txId: tx.id, pos: (e.currentTarget as HTMLElement).getBoundingClientRect() });
   };
+
+  const handleBulkToggleExclude = useCallback(() => {
+    const sel = [...selectedIds];
+    const txMap = Object.fromEntries(allTxs.map((t) => [t.id, t]));
+    const anyIncluded = sel.some((id) => !txMap[id]?.excluded);
+    batchEditTxs(sel.map((id) => ({ id, updates: { excluded: anyIncluded } })));
+    setSelectedIds(new Set());
+  }, [selectedIds, allTxs, batchEditTxs]);
+
+  const handleBulkDelete = useCallback(() => {
+    [...selectedIds].forEach((id) => deleteTx(id));
+    setSelectedIds(new Set());
+    setDeleteConfirm(false);
+  }, [selectedIds, deleteTx]);
+
+  const handleBulkRecategorize = useCallback((cat: string) => {
+    const sel = [...selectedIds];
+    batchEditTxs(sel.map((id) => ({ id, updates: { category: cat, needsReview: false } })));
+    const uniqueDescs = [...new Set(
+      sel.map((id) => allTxs.find((t) => t.id === id)?.description ?? '').filter(Boolean)
+    )];
+    setMerchantPrompt({ descs: uniqueDescs, cat });
+    setBulkCatOpen(false);
+    setSelectedIds(new Set());
+  }, [selectedIds, allTxs, batchEditTxs]);
+
+  const handleBulkAddTag = useCallback((tag: string) => {
+    const t = tag.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!t) return;
+    batchEditTxs([...selectedIds].map((id) => {
+      const tx = allTxs.find((x) => x.id === id);
+      const existing = tx?.tags ?? [];
+      return { id, updates: { tags: existing.includes(t) ? existing : [...existing, t] } };
+    }));
+    handleUpdateUserTags([...new Set([...userTags, t])]);
+    setBulkTagOpen(false);
+    setBulkTagValue('');
+    setSelectedIds(new Set());
+  }, [selectedIds, allTxs, batchEditTxs, userTags, handleUpdateUserTags]);
 
   const openCatFilter = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); };
   const openTagFilter = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); };
@@ -701,11 +777,28 @@ export default function Transactions() {
                   const isSelected = selectedId === tx.id;
                   const showDot    = tx.needsReview && !tx.reviewed && !isExcluded;
 
+                  const isChecked = selectedIds.has(tx.id);
+                  const showCb   = anySelected || hoveredRowId === tx.id;
+
                   return (
-                    <div key={tx.id} onClick={() => setSelectedId(isSelected ? null : tx.id)}
+                    <div key={tx.id}
+                      onClick={() => {
+                        if (anySelected) {
+                          setSelectedIds((p) => { const n = new Set(p); n.has(tx.id) ? n.delete(tx.id) : n.add(tx.id); return n; });
+                        } else {
+                          setSelectedId(isSelected ? null : tx.id);
+                        }
+                      }}
                       style={{ display: 'flex', alignItems: 'center', minHeight: 58, padding: '10px 20px', gap: 12, borderBottom: '1px solid var(--border-2)', cursor: 'pointer', transition: 'background 0.1s', opacity: isExcluded ? 0.5 : 1, background: isSelected ? 'var(--card-alt)' : 'transparent' }}
-                      onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.025)'; }}
-                      onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}>
+                      onMouseEnter={(e) => { setHoveredRowId(tx.id); if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.025)'; }}
+                      onMouseLeave={(e) => { setHoveredRowId(null); if (!isSelected) e.currentTarget.style.background = 'transparent'; }}>
+
+                      <div style={{ width: 18, flexShrink: 0, display: 'flex', alignItems: 'center', opacity: showCb ? 1 : 0, transition: 'opacity 0.1s' }}>
+                        <input type="checkbox" checked={isChecked}
+                          onChange={() => setSelectedIds((p) => { const n = new Set(p); n.has(tx.id) ? n.delete(tx.id) : n.add(tx.id); return n; })}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ width: 13, height: 13, accentColor: 'var(--accent)', cursor: 'pointer' }} />
+                      </div>
 
                       <div style={{ position: 'relative', flexShrink: 0 }}>
                         <div style={{ width: 36, height: 36, borderRadius: '50%', background: hexToRgba(catColor, 0.15), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: catColor }}>
@@ -725,6 +818,9 @@ export default function Transactions() {
                               title="Click to change category">
                               {tx.category}
                             </button>
+                          )}
+                          {tx.isDuplicate && (
+                            <span title="Possible duplicate" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(245,162,0,0.12)', color: 'var(--amber)', border: '1px solid rgba(245,162,0,0.25)', flexShrink: 0 }}>~dup</span>
                           )}
                           {tx.account && !isExcluded && (
                             <span style={{ fontSize: 10, color: 'var(--text-3)', opacity: 0.55, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{tx.account}</span>
@@ -785,16 +881,105 @@ export default function Transactions() {
         if (!tx) return null;
         return (
           <InlineCatPopover pos={inlineCat.pos} tx={tx} categories={categories}
-            onSelect={(cat) => { editTx(tx.id, { category: cat, needsReview: false }); setInlineCat(null); }}
+            onSelect={(cat) => {
+              if (cat !== tx.category) {
+                editTx(tx.id, { category: cat, needsReview: false });
+                setMerchantPrompt({ descs: [tx.description], cat });
+              }
+              setInlineCat(null);
+            }}
             onClose={() => setInlineCat(null)} />
         );
       })()}
 
       {selectedTx && (
-        <DetailPanel tx={selectedTx} categories={categories}
+        <DetailPanel tx={selectedTx} categories={categories} allTxs={allTxs}
           onEdit={editTx} onDelete={deleteTx} onExclude={excludeTx} onSplit={splitTx}
-          onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags} />
+          onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags}
+          onCategoryChanged={(desc, cat) => setMerchantPrompt({ descs: [desc], cat })} />
       )}
+
+      {/* Bulk action toolbar */}
+      {anySelected && (
+        <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 45, background: 'var(--panel)', borderTop: '1px solid var(--border)', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 10, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)', animation: 'slideUp 0.15s ease' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-2)', marginRight: 4 }}>{selectedIds.size} selected</span>
+          <button onClick={() => setSelectedIds(allVisibleSelected ? new Set() : new Set(sorted.map((t) => t.id)))}
+            style={{ fontSize: 11, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            {allVisibleSelected ? 'Deselect all' : 'Select all visible'}
+          </button>
+          <div style={{ flex: 1 }} />
+          <button onClick={() => setBulkCatOpen(true)} className="btn" style={{ fontSize: 12 }}>Recategorize</button>
+          <button onClick={() => setBulkTagOpen(true)} className="btn" style={{ fontSize: 12 }}>Add tag</button>
+          <button onClick={handleBulkToggleExclude} className="btn" style={{ fontSize: 12 }}>Exclude/Include</button>
+          <button onClick={() => setDeleteConfirm(true)} className="btn" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(242,70,58,0.3)' }}>Delete</button>
+          <button onClick={() => setSelectedIds(new Set())} style={{ fontSize: 13, color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', lineHeight: 1 }}>✕</button>
+        </div>
+      )}
+
+      {/* Bulk recategorize modal */}
+      {bulkCatOpen && (
+        <Modal title={`Recategorize ${selectedIds.size} transaction${selectedIds.size !== 1 ? 's' : ''}`} onClose={() => setBulkCatOpen(false)}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 320, overflowY: 'auto' }}>
+            {categories.map((c) => (
+              <button key={c.id} onClick={() => handleBulkRecategorize(c.name)}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', border: 'none', background: 'none', cursor: 'pointer', borderRadius: 6, textAlign: 'left', color: 'var(--text-1)', width: '100%' }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: getCategoryColor(c.name, categories), flexShrink: 0 }} />
+                <span style={{ fontSize: 13 }}>{c.name}</span>
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {/* Bulk add tag modal */}
+      {bulkTagOpen && (
+        <Modal title={`Add tag to ${selectedIds.size} transaction${selectedIds.size !== 1 ? 's' : ''}`} onClose={() => setBulkTagOpen(false)}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input autoFocus type="text" placeholder="Tag name" value={bulkTagValue}
+              onChange={(e) => setBulkTagValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleBulkAddTag(bulkTagValue); }}
+              style={{ flex: 1, height: 34, fontSize: 13, padding: '0 10px', borderRadius: 7, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+            <button onClick={() => handleBulkAddTag(bulkTagValue)} className="btn btn-primary" style={{ fontSize: 12 }}>Add</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteConfirm && (
+        <Modal title="Delete transactions" onClose={() => setDeleteConfirm(false)}>
+          <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 16 }}>
+            Delete {selectedIds.size} transaction{selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.
+          </p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setDeleteConfirm(false)} className="btn" style={{ fontSize: 12 }}>Cancel</button>
+            <button onClick={handleBulkDelete} className="btn" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(242,70,58,0.3)' }}>Delete</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Merchant rule prompt toast */}
+      {merchantPrompt && (
+        <div style={{ position: 'fixed', bottom: anySelected ? 66 : 20, left: '50%', transform: 'translateX(-50%)', zIndex: 46, background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, padding: '12px 16px', boxShadow: '0 8px 28px rgba(0,0,0,0.2)', maxWidth: 420, width: 'calc(100vw - 40px)' }}>
+          <p style={{ fontSize: 12, color: 'var(--text-1)', marginBottom: 10 }}>
+            {merchantPrompt.descs.length === 1
+              ? <>Always categorize <strong>"{merchantPrompt.descs[0]}"</strong> as <strong>{merchantPrompt.cat}</strong>?</>
+              : <>Create rules for <strong>{merchantPrompt.descs.length} merchants</strong> → <strong>{merchantPrompt.cat}</strong>?</>}
+          </p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setMerchantPrompt(null)} className="btn" style={{ fontSize: 11 }}>No</button>
+            <button onClick={() => {
+              merchantPrompt.descs.forEach((d) => createMerchantRule(d, merchantPrompt.cat));
+              setMerchantPrompt(null);
+              setNotice({ ok: true, msg: `Rule${merchantPrompt.descs.length > 1 ? 's' : ''} created for ${merchantPrompt.descs.length > 1 ? merchantPrompt.descs.length + ' merchants' : `"${merchantPrompt.descs[0]}"`}.` });
+              setTimeout(() => setNotice(null), 2500);
+            }} className="btn btn-primary" style={{ fontSize: 11 }}>Yes</button>
+          </div>
+        </div>
+      )}
+
+      <style>{`@keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
     </div>
   );
 }

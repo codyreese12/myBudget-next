@@ -53,10 +53,11 @@ interface BudgetContextValue {
   addTx: (t: Omit<Transaction, 'id'>) => void;
   deleteTx: (id: string) => void;
   editTx: (id: string, updates: Partial<Transaction>) => void;
-  importTxs: (incoming: Transaction[]) => Promise<void>;
+  importTxs: (incoming: Transaction[]) => Promise<{ imported: number; exactDups: number; fuzzyDups: number }>;
   excludeTx: (id: string, excluded: boolean) => void;
   batchEditTxs: (changes: Array<{ id: string; updates: Partial<Transaction> }>) => void;
   splitTx: (parentId: string, splits: Array<{ description: string; amount: number; category: string }>) => void;
+  createMerchantRule: (description: string, category: string) => void;
 
   // Goals
   addGoal: (g: Omit<Goal, 'id'>) => void;
@@ -148,20 +149,18 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   txsRef.current = txs;
 
   const editTx = useCallback((id: string, updates: Partial<Transaction>) => {
-    if (updates.category) {
-      const tx = txsRef.current.find((t) => t.id === id);
-      if (tx) {
-        addMerchantRule(tx.description, updates.category);
-        setMerchantRules(loadMerchantRules());
-      }
-    }
     setTxs((p) => p.map((t) => (t.id === id ? { ...t, ...updates } : t)));
+  }, []);
+
+  const createMerchantRule = useCallback((description: string, category: string) => {
+    addMerchantRule(description, category);
+    setMerchantRules(loadMerchantRules());
   }, []);
 
   const categoriesRef = useRef(categories);
   categoriesRef.current = categories;
 
-  const importTxs = useCallback(async (incoming: Transaction[]) => {
+  const importTxs = useCallback(async (incoming: Transaction[]): Promise<{ imported: number; exactDups: number; fuzzyDups: number }> => {
     const snap = await new Promise<Transaction[]>((resolve) =>
       setTxs((prev) => { resolve(prev); return prev; })
     );
@@ -171,13 +170,30 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     const unique = incoming.filter(
       (t) => !seen.has(`${t.date}|${Math.round(Math.abs(t.amount)*100)}|${(t.description??'').toLowerCase().trim()}`)
     );
-    if (unique.length === 0) return;
+    const exactDups = incoming.length - unique.length;
+    if (unique.length === 0) return { imported: 0, exactDups, fuzzyDups: 0 };
+
+    // Fuzzy duplicate detection: same description + amount, date within ±2 days
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const fuzzyTagged = unique.map((t): Transaction => {
+      const tDate = new Date(t.date + 'T00:00:00').getTime();
+      const tAmt  = Math.round(Math.abs(t.amount) * 100);
+      const tDesc = (t.description ?? '').toLowerCase().trim();
+      const isFuzzy = snap.some((e) => {
+        if (Math.round(Math.abs(e.amount) * 100) !== tAmt) return false;
+        if ((e.description ?? '').toLowerCase().trim() !== tDesc) return false;
+        return Math.abs(new Date(e.date + 'T00:00:00').getTime() - tDate) <= 2 * DAY_MS;
+      });
+      return isFuzzy ? { ...t, isDuplicate: true, needsReview: true } : t;
+    });
+    const fuzzyDups = fuzzyTagged.filter((t) => t.isDuplicate).length;
 
     const rules = loadMerchantRules();
     const cats  = categoriesRef.current;
     const fallbackNames = new Set(['Other', 'Other Income']);
 
-    const processed = unique.map((t): Transaction => {
+    const processed = fuzzyTagged.map((t): Transaction => {
+      if (t.isDuplicate) return t; // keep isDuplicate/needsReview flags, skip re-categorization override
       if (t.categorizedBy === 'bank') return { ...t, needsReview: false };
       if (t.excluded) return t;
       const learnedCat = applyLearnedRules(t.description, rules);
@@ -188,12 +204,12 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       return { ...t, needsReview: true };
     });
 
-    const needsAI = processed.filter((t) => !t.excluded && fallbackNames.has(t.category));
+    const needsAI = processed.filter((t) => !t.excluded && !t.isDuplicate && fallbackNames.has(t.category));
     if (needsAI.length > 0) {
       const descs = [...new Set(needsAI.map((t) => t.description))];
       const aiMap = await aiCategorizeUnknown(descs, cats);
       const withAI = processed.map((t): Transaction => {
-        if (t.excluded || !fallbackNames.has(t.category)) return t;
+        if (t.excluded || t.isDuplicate || !fallbackNames.has(t.category)) return t;
         const aiCat = aiMap[t.description];
         if (aiCat) return { ...t, category: aiCat, categorizedBy: 'ai', needsReview: true };
         return t;
@@ -202,6 +218,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     } else {
       setTxs((prev) => [...processed, ...prev]);
     }
+    return { imported: unique.length, exactDups, fuzzyDups };
   }, []);
 
   const excludeTx = useCallback((id: string, excluded: boolean) => {
@@ -278,7 +295,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     <BudgetContext.Provider value={{
       txs, categories, budget, carryOver, dark, dateRange, goals, merchantRules,
       filteredTxs,
-      addTx, deleteTx, editTx, importTxs, excludeTx, batchEditTxs, splitTx,
+      addTx, deleteTx, editTx, importTxs, excludeTx, batchEditTxs, splitTx, createMerchantRule,
       addGoal, updateGoal, deleteGoal,
       updateBudget, toggleCarryOver,
       addCategory, deleteCategory, editCategory,

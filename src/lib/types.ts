@@ -29,6 +29,7 @@ export interface Transaction {
   categorizedBy?: CategorizedBy;
   needsReview?: boolean;
   reviewed?: boolean;
+  isDuplicate?: boolean;
 }
 
 export interface SplitChild {
