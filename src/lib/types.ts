@@ -17,6 +17,7 @@ export interface Transaction {
   id: string;
   date: string;           // ISO YYYY-MM-DD
   description: string;
+  displayName?: string;   // clean merchant name shown in UI; falls back to description
   amount: number;         // positive = expense, negative = income
   category: string;
   account?: string;

@@ -123,3 +123,16 @@ export function addMerchantRule(description: string, category: string): void {
   rules[description.toLowerCase().trim()] = category;
   saveMerchantRules(rules);
 }
+
+export function deleteMerchantRule(description: string): void {
+  const rules = loadMerchantRules();
+  delete rules[description.toLowerCase().trim()];
+  saveMerchantRules(rules);
+}
+
+export function updateMerchantRule(oldDesc: string, newDesc: string, category: string): void {
+  const rules = loadMerchantRules();
+  delete rules[oldDesc.toLowerCase().trim()];
+  rules[newDesc.toLowerCase().trim()] = category;
+  saveMerchantRules(rules);
+}

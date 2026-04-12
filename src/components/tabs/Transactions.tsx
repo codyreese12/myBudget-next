@@ -4,7 +4,8 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useBudget } from '@/lib/BudgetContext';
 import { getCategoryColor, getCategoriesByType } from '@/lib/constants';
 import { importCSV } from '@/lib/csvImport';
-import type { Transaction, Category } from '@/lib/types';
+import { cleanDescription } from '@/lib/autoCategory';
+import type { Transaction, Category, MerchantRules } from '@/lib/types';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function usd(n: number, d = 2) {
@@ -30,6 +31,22 @@ function loadUserTags(): string[] {
   try { return JSON.parse(localStorage.getItem('userTags') ?? 'null') || []; } catch { return []; }
 }
 
+// ── Auto-suggest rule helpers ──────────────────────────────────────────────────
+// Tracks how many times each (descLower|||catName) pair has been manually set.
+function loadCatCounts(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem('budget_cat_counts') ?? 'null') || {}; } catch { return {}; }
+}
+function saveCatCounts(v: Record<string, number>): void {
+  localStorage.setItem('budget_cat_counts', JSON.stringify(v));
+}
+// Stores "descLower|||catName" keys the user has already dismissed.
+function loadDismissed(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem('budget_rule_dismissed') ?? 'null') || []); } catch { return new Set(); }
+}
+function saveDismissed(s: Set<string>): void {
+  localStorage.setItem('budget_rule_dismissed', JSON.stringify([...s]));
+}
+
 // ── Icons ──────────────────────────────────────────────────────────────────────
 function Icon({ d, size = 12 }: { d: string; size?: number }) {
   return (
@@ -47,7 +64,32 @@ const IC = {
   chevD:  'M2 5l5 5 5-5',
   tag:    'M1.5 1.5h5l6 6-5 5-6-6v-5zM4 4h.01',
   check:  'M2 7l4 4 6-6',
+  edit:   'M9.5 2.5l2 2L5 11H3V9l6.5-6.5zM10 4l-2-2',
+  rules:  'M2 3.5h10M2 7h7M2 10.5h8',
+  save:   'M2 12V2.5A.5.5 0 012.5 2h7l2.5 2.5V12a.5.5 0 01-.5.5H2.5A.5.5 0 012 12zM5 12V8h4v4M5 2v3h5V2',
 };
+
+// ── Filter Presets ─────────────────────────────────────────────────────────────
+interface FilterPreset {
+  id: string;
+  name: string;
+  categories: string[];
+  tags: string[];
+  search: string;
+  sort: string;
+  minAmt: string;
+  maxAmt: string;
+}
+
+const PRESETS_KEY = 'filterPresets';
+
+function loadPresets(): FilterPreset[] {
+  try { return JSON.parse(localStorage.getItem(PRESETS_KEY) ?? 'null') || []; } catch { return []; }
+}
+
+function savePresets(presets: FilterPreset[]) {
+  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+}
 
 // ── Modal ──────────────────────────────────────────────────────────────────────
 function Modal({ title, onClose, children, maxWidth = 400 }: { title: string; onClose: () => void; children: React.ReactNode; maxWidth?: number }) {
@@ -290,15 +332,16 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   onUpdateUserTags: (tags: string[]) => void;
   onCategoryChanged?: (desc: string, cat: string) => void;
 }) {
-  const [visible,   setVisible]   = useState(false);
-  const [cat,       setCat]       = useState(tx.category);
-  const [notes,     setNotes]     = useState(tx.notes ?? '');
-  const [tags,      setTags]      = useState(tx.tags ?? []);
-  const [tagInput,  setTagInput]  = useState('');
-  const [splitting, setSplitting] = useState(false);
+  const [visible,      setVisible]      = useState(false);
+  const [cat,          setCat]          = useState(tx.category);
+  const [displayName,  setDisplayName]  = useState(tx.displayName ?? '');
+  const [notes,        setNotes]        = useState(tx.notes ?? '');
+  const [tags,         setTags]         = useState(tx.tags ?? []);
+  const [tagInput,     setTagInput]     = useState('');
+  const [splitting,    setSplitting]    = useState(false);
 
   useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
-  useEffect(() => { setCat(tx.category); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); }, [tx.id]); // eslint-disable-line
+  useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); }, [tx.id]); // eslint-disable-line
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', h);
@@ -333,7 +376,8 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
 
   const save = () => {
     const catChanged = cat !== tx.category;
-    onEdit(tx.id, { category: cat, notes, tags, needsReview: false });
+    const dn = displayName.trim() || undefined;
+    onEdit(tx.id, { category: cat, notes, tags, needsReview: false, displayName: dn });
     if (catChanged) onCategoryChanged?.(tx.description, cat);
     onClose();
   };
@@ -356,7 +400,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
       }}>
         <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexShrink: 0 }}>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-1)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description}</p>
+            <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-1)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.displayName || cleanDescription(tx.description) || tx.description}</p>
             <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 3 }}>
               {new Date(tx.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
             </p>
@@ -402,6 +446,16 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
                 {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
               </select>
             </div>
+          </div>
+
+          <div>
+            <label className="label" style={{ display: 'block', marginBottom: 6 }}>Display name</label>
+            <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={tx.description}
+              style={{ width: '100%', height: 34, fontSize: 13, padding: '0 10px', borderRadius: 7, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', boxSizing: 'border-box' }} />
+            <p style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={tx.description}>
+              Raw: {tx.description}
+            </p>
           </div>
 
           {tx.account && (
@@ -493,9 +547,119 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   );
 }
 
+// ── Rules manager modal ────────────────────────────────────────────────────────
+function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, onClose }: {
+  merchantRules: MerchantRules;
+  categories: Category[];
+  onCreate: (desc: string, cat: string) => void;
+  onDelete: (desc: string) => void;
+  onUpdate: (oldDesc: string, newDesc: string, cat: string) => void;
+  onClose: () => void;
+}) {
+  const [newDesc, setNewDesc] = useState('');
+  const [newCat,  setNewCat]  = useState(categories[0]?.name ?? '');
+  const [editKey, setEditKey] = useState<string | null>(null);
+  const [editDesc, setEditDesc] = useState('');
+  const [editCat,  setEditCat]  = useState('');
+  const [q, setQ] = useState('');
+
+  const ruleCount = Object.keys(merchantRules).length;
+  const entries = Object.entries(merchantRules)
+    .filter(([k]) => !q || k.includes(q.toLowerCase()))
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const startEdit = (key: string, cat: string) => { setEditKey(key); setEditDesc(key); setEditCat(cat); };
+  const commitEdit = () => {
+    if (!editDesc.trim() || !editKey) return;
+    onUpdate(editKey, editDesc.trim(), editCat);
+    setEditKey(null);
+  };
+  const handleAdd = () => {
+    if (!newDesc.trim()) return;
+    onCreate(newDesc.trim(), newCat);
+    setNewDesc('');
+  };
+
+  return (
+    <Modal title={`Merchant Rules${ruleCount > 0 ? ` · ${ruleCount}` : ''}`} onClose={onClose} maxWidth={500}>
+      {/* Add new rule */}
+      <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
+        <input type="text" placeholder="Merchant keyword (e.g. starbucks)" value={newDesc}
+          onChange={(e) => setNewDesc(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+          style={{ flex: 1, height: 32, fontSize: 12, padding: '0 10px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+        <select value={newCat} onChange={(e) => setNewCat(e.target.value)}
+          style={{ height: 32, fontSize: 12, borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 6px' }}>
+          {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+        </select>
+        <button onClick={handleAdd} disabled={!newDesc.trim()} className="btn btn-primary"
+          style={{ fontSize: 12, height: 32, padding: '0 12px', opacity: newDesc.trim() ? 1 : 0.4, cursor: newDesc.trim() ? 'pointer' : 'default' }}>
+          Add
+        </button>
+      </div>
+
+      {/* Search — only show when there are enough rules to warrant it */}
+      {ruleCount > 6 && (
+        <input type="text" placeholder="Search rules…" value={q} onChange={(e) => setQ(e.target.value)}
+          style={{ width: '100%', height: 28, fontSize: 12, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border-2)', color: 'var(--text-1)', marginBottom: 8, boxSizing: 'border-box' }} />
+      )}
+
+      {/* Rule list */}
+      {entries.length === 0 ? (
+        <p style={{ fontSize: 12, color: 'var(--text-3)', textAlign: 'center', padding: '28px 0' }}>
+          {ruleCount === 0 ? 'No rules yet. Add one above.' : 'No rules match.'}
+        </p>
+      ) : (
+        <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
+          {entries.map(([key, cat]) =>
+            editKey === key ? (
+              <div key={key} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 8px', borderRadius: 7, background: 'var(--card-alt)', border: '1px solid rgba(91,87,245,0.2)' }}>
+                <input autoFocus value={editDesc} onChange={(e) => setEditDesc(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditKey(null); }}
+                  style={{ flex: 1, height: 28, fontSize: 12, padding: '0 8px', borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+                <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
+                <select value={editCat} onChange={(e) => setEditCat(e.target.value)}
+                  style={{ height: 28, fontSize: 11, borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 4px' }}>
+                  {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+                </select>
+                <button onClick={commitEdit} className="btn btn-primary" style={{ fontSize: 11, height: 28, padding: '0 10px' }}>Save</button>
+                <button onClick={() => setEditKey(null)} className="btn" style={{ fontSize: 11, height: 28, padding: '0 8px' }}>×</button>
+              </div>
+            ) : (
+              <div key={key}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 7, transition: 'background 0.1s' }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+                <span style={{ flex: 1, fontSize: 12, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: getCategoryColor(cat, categories) }} />
+                  <span style={{ fontSize: 12, color: 'var(--text-2)', whiteSpace: 'nowrap' }}>{cat}</span>
+                </div>
+                <button onClick={() => startEdit(key, cat)} title="Edit"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-1)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                  <Icon d={IC.edit} size={11} />
+                </button>
+                <button onClick={() => onDelete(key)} title="Delete"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                  <Icon d={IC.trash} size={11} />
+                </button>
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules } = useBudget();
 
   const [showAdd,         setShowAdd]         = useState(false);
   const [selectedId,      setSelectedId]      = useState<string | null>(null);
@@ -520,8 +684,55 @@ export default function Transactions() {
   const [bulkTagValue,    setBulkTagValue]    = useState('');
   const [deleteConfirm,   setDeleteConfirm]   = useState(false);
   const [merchantPrompt,  setMerchantPrompt]  = useState<{ descs: string[]; cat: string } | null>(null);
+  const [showRules,       setShowRules]       = useState(false);
+  const [ruleSuggestion,  setRuleSuggestion]  = useState<{ desc: string; cat: string } | null>(null);
+  const [presets,         setPresets]         = useState<FilterPreset[]>([]);
+  const [savePresetOpen,  setSavePresetOpen]  = useState(false);
+  const [presetName,      setPresetName]      = useState('');
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
+  useEffect(() => { setPresets(loadPresets()); }, []);
+
+  // ── Auto-suggest rules ─────────────────────────────────────────────────────
+  // Keep a synchronous ref so callbacks always see the latest rules without
+  // needing to be re-created when merchantRules changes.
+  const merchantRulesRef = useRef(merchantRules);
+  merchantRulesRef.current = merchantRules;
+
+  // Scan stored categorization counts for any pending suggestion to show.
+  const checkSuggestion = useCallback(() => {
+    const counts   = loadCatCounts();
+    const dismissed = loadDismissed();
+    const rules    = merchantRulesRef.current;
+    for (const [key, count] of Object.entries(counts)) {
+      if (count < 2) continue;
+      const sep = key.indexOf('|||');
+      if (sep === -1) continue;
+      const descLower = key.slice(0, sep);
+      const cat       = key.slice(sep + 3);
+      if (!cat) continue;
+      if (rules[descLower]) continue;   // rule already saved
+      if (dismissed.has(key)) continue; // user already dismissed this
+      setRuleSuggestion({ desc: descLower, cat });
+      return;
+    }
+    setRuleSuggestion(null);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-check whenever saved rules change (e.g. after a rule is created or deleted).
+  useEffect(() => { checkSuggestion(); }, [merchantRules, checkSuggestion]);
+
+  // Record a manual categorization and surface a suggestion once threshold is reached.
+  const recordCategorization = useCallback((rawDesc: string, cat: string) => {
+    const descLower = rawDesc.toLowerCase().trim();
+    const key = `${descLower}|||${cat}`;
+    const counts = loadCatCounts();
+    counts[key] = (counts[key] ?? 0) + 1;
+    saveCatCounts(counts);
+    if (counts[key] >= 2 && !merchantRulesRef.current[descLower] && !loadDismissed().has(key)) {
+      setRuleSuggestion({ desc: descLower, cat });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fileRef = useRef<HTMLInputElement>(null);
   const selectedTx = selectedId ? (allTxs.find((t) => t.id === selectedId) ?? null) : null;
@@ -549,7 +760,7 @@ export default function Transactions() {
       return true;
     })
     .filter((t) => tagFilters.size === 0 || (t.tags ?? []).some((tag) => tagFilters.has(tag)))
-    .filter((t) => !search || (t.description ?? '').toLowerCase().includes(search.toLowerCase()))
+    .filter((t) => !search || (t.displayName || cleanDescription(t.description) || t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.description || '').toLowerCase().includes(search.toLowerCase()))
     .filter((t) => {
       const abs = Math.abs(t.amount);
       if (minAmt !== '' && abs < parseFloat(minAmt)) return false;
@@ -562,7 +773,7 @@ export default function Transactions() {
       case 'date-asc':    return new Date(a.date).getTime() - new Date(b.date).getTime();
       case 'amount-high': return Math.abs(b.amount) - Math.abs(a.amount);
       case 'amount-low':  return Math.abs(a.amount) - Math.abs(b.amount);
-      case 'merchant-az': return (a.description ?? '').localeCompare(b.description ?? '');
+      case 'merchant-az': return (a.displayName || cleanDescription(a.description) || a.description || '').localeCompare(b.displayName || cleanDescription(b.description) || b.description || '');
       default:            return new Date(b.date).getTime() - new Date(a.date).getTime();
     }
   });
@@ -664,6 +875,41 @@ export default function Transactions() {
   const openCatFilter = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); };
   const openTagFilter = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); };
 
+  const handleSavePreset = useCallback(() => {
+    const name = presetName.trim();
+    if (!name) return;
+    const preset: FilterPreset = {
+      id: Date.now().toString(),
+      name,
+      categories: [...catFilters],
+      tags: [...tagFilters],
+      search,
+      sort,
+      minAmt,
+      maxAmt,
+    };
+    const updated = [...presets, preset];
+    setPresets(updated);
+    savePresets(updated);
+    setPresetName('');
+    setSavePresetOpen(false);
+  }, [presetName, catFilters, tagFilters, search, sort, minAmt, maxAmt, presets]);
+
+  const handleApplyPreset = useCallback((preset: FilterPreset) => {
+    setCatFilters(new Set(preset.categories));
+    setTagFilters(new Set(preset.tags));
+    setSearch(preset.search);
+    setSort(preset.sort);
+    setMinAmt(preset.minAmt);
+    setMaxAmt(preset.maxAmt);
+  }, []);
+
+  const handleDeletePreset = useCallback((id: string) => {
+    const updated = presets.filter((p) => p.id !== id);
+    setPresets(updated);
+    savePresets(updated);
+  }, [presets]);
+
   const catItems = categories.map((c) => ({ id: c.name, label: c.name, color: getCategoryColor(c.name, categories) }));
   const tagItems = allTagsList.map((t) => ({ id: t, label: `#${t}` }));
   const filterActive = catFilters.size > 0 || tagFilters.size > 0 || needsReviewOnly;
@@ -694,11 +940,53 @@ export default function Transactions() {
             <Icon d={IC.import} /> Import
           </button>
           <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleImport} />
+          <button className="btn" onClick={() => setShowRules(true)} style={{ fontSize: 12, padding: '6px 12px' }}>
+            <Icon d={IC.rules} /> Rules
+          </button>
           <button className="btn btn-primary" onClick={() => setShowAdd(true)} style={{ fontSize: 12, padding: '6px 12px' }}>
             <Icon d={IC.plus} /> Add
           </button>
         </div>
       </div>
+
+      {/* Saved Presets Row */}
+      {(presets.length > 0 || savePresetOpen) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10, alignItems: 'center' }}>
+          {presets.map((preset) => (
+            <div key={preset.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 26, paddingLeft: 10, paddingRight: 6, borderRadius: 99, fontSize: 11, fontWeight: 500, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }}>
+              <span onClick={() => handleApplyPreset(preset)} style={{ cursor: 'pointer' }}>{preset.name}</span>
+              <button onClick={() => handleDeletePreset(preset.id)}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, borderRadius: '50%', border: 'none', background: 'none', color: 'var(--text-3)', cursor: 'pointer', padding: 0, flexShrink: 0 }}
+                title="Delete preset">
+                <Icon d={IC.close} size={8} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Save Preset Dialog */}
+      {savePresetOpen && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }}>
+          <input
+            autoFocus
+            type="text"
+            placeholder="Preset name…"
+            value={presetName}
+            onChange={(e) => setPresetName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleSavePreset(); if (e.key === 'Escape') { setSavePresetOpen(false); setPresetName(''); } }}
+            style={{ height: 30, fontSize: 12, padding: '0 10px', borderRadius: 8, border: '1px solid var(--accent)', background: 'var(--card)', color: 'var(--text-1)', width: 180, outline: 'none' }}
+          />
+          <button onClick={handleSavePreset} disabled={!presetName.trim()}
+            style={{ height: 30, fontSize: 11, padding: '0 12px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', cursor: presetName.trim() ? 'pointer' : 'not-allowed', opacity: presetName.trim() ? 1 : 0.5 }}>
+            Save
+          </button>
+          <button onClick={() => { setSavePresetOpen(false); setPresetName(''); }}
+            style={{ height: 30, fontSize: 11, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'none', color: 'var(--text-3)', cursor: 'pointer' }}>
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Row 2: Toolbar */}
       <div style={{ display: 'flex', gap: 7, marginBottom: 14, alignItems: 'center' }}>
@@ -729,6 +1017,10 @@ export default function Transactions() {
           <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setNeedsReviewOnly(false); }}
             style={{ height: 36, fontSize: 11, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'none', color: 'var(--text-3)', cursor: 'pointer', flexShrink: 0 }}>Clear</button>
         )}
+        <button onClick={() => { setSavePresetOpen((v) => !v); setPresetName(''); }}
+          style={{ ...ctrl(), gap: 5, flexShrink: 0 }} title="Save current filters as a preset">
+          <Icon d={IC.save} size={11} /> Save filters
+        </button>
       </div>
 
       {/* Needs-review badge */}
@@ -748,6 +1040,28 @@ export default function Transactions() {
         <div style={{ marginBottom: 12, padding: '9px 14px', borderRadius: 8, fontSize: 12, fontWeight: 500, background: notice.ok ? 'rgba(52,211,153,0.1)' : 'rgba(242,70,58,0.1)', color: notice.ok ? 'var(--green)' : 'var(--red)', border: `1px solid ${notice.ok ? 'rgba(52,211,153,0.25)' : 'rgba(242,70,58,0.25)'}` }}>
           {notice.msg}
           {!notice.ok && <p style={{ marginTop: 4, fontWeight: 400, opacity: 0.8, fontSize: 11 }}>Tip: Make sure your CSV has Date, Description, and Amount columns.</p>}
+        </div>
+      )}
+
+      {/* Auto-suggest rule banner */}
+      {ruleSuggestion && (
+        <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, fontSize: 12, background: 'rgba(91,87,245,0.07)', border: '1px solid rgba(91,87,245,0.22)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, color: 'var(--text-1)', minWidth: 160 }}>
+            Always categorize <strong>"{ruleSuggestion.desc}"</strong> as <strong>{ruleSuggestion.cat}</strong>?
+          </span>
+          <div style={{ display: 'flex', gap: 7, flexShrink: 0 }}>
+            <button onClick={() => {
+              createMerchantRule(ruleSuggestion.desc, ruleSuggestion.cat);
+              setRuleSuggestion(null);
+            }} className="btn btn-primary" style={{ fontSize: 11, height: 28, padding: '0 12px' }}>Save rule</button>
+            <button onClick={() => {
+              const key = `${ruleSuggestion.desc}|||${ruleSuggestion.cat}`;
+              const d = loadDismissed();
+              d.add(key);
+              saveDismissed(d);
+              checkSuggestion();
+            }} className="btn" style={{ fontSize: 11, height: 28, padding: '0 10px' }}>Dismiss</button>
+          </div>
         </div>
       )}
 
@@ -773,7 +1087,8 @@ export default function Transactions() {
                   const txIsIncome = catType(tx.category, categories) === 'income';
                   const isExcluded = !!tx.excluded;
                   const catColor   = isExcluded ? '#94a3b8' : getCategoryColor(tx.category, categories);
-                  const initial    = (tx.description ?? '?')[0].toUpperCase();
+                  const displayStr = tx.displayName || cleanDescription(tx.description) || tx.description;
+                  const initial    = (displayStr ?? '?')[0].toUpperCase();
                   const isSelected = selectedId === tx.id;
                   const showDot    = tx.needsReview && !tx.reviewed && !isExcluded;
 
@@ -808,7 +1123,7 @@ export default function Transactions() {
                       </div>
 
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: isExcluded ? 'line-through' : 'none' }}>{tx.description}</p>
+                        <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: isExcluded ? 'line-through' : 'none' }}>{displayStr}</p>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 3, overflow: 'hidden' }}>
                           {isExcluded ? (
                             <span style={{ fontSize: 11, color: 'var(--text-3)' }}>Excluded</span>
@@ -885,6 +1200,7 @@ export default function Transactions() {
               if (cat !== tx.category) {
                 editTx(tx.id, { category: cat, needsReview: false });
                 setMerchantPrompt({ descs: [tx.description], cat });
+                recordCategorization(tx.description, cat);
               }
               setInlineCat(null);
             }}
@@ -896,7 +1212,7 @@ export default function Transactions() {
         <DetailPanel tx={selectedTx} categories={categories} allTxs={allTxs}
           onEdit={editTx} onDelete={deleteTx} onExclude={excludeTx} onSplit={splitTx}
           onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags}
-          onCategoryChanged={(desc, cat) => setMerchantPrompt({ descs: [desc], cat })} />
+          onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }} />
       )}
 
       {/* Bulk action toolbar */}
@@ -957,6 +1273,13 @@ export default function Transactions() {
             <button onClick={handleBulkDelete} className="btn" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(242,70,58,0.3)' }}>Delete</button>
           </div>
         </Modal>
+      )}
+
+      {/* Rules manager modal */}
+      {showRules && (
+        <RulesModal merchantRules={merchantRules} categories={categories}
+          onCreate={createMerchantRule} onDelete={deleteMerchantRule} onUpdate={updateMerchantRule}
+          onClose={() => setShowRules(false)} />
       )}
 
       {/* Merchant rule prompt toast */}

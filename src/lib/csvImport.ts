@@ -1,4 +1,4 @@
-import { isTransfer } from './autoCategory';
+import { isTransfer, cleanDescription } from './autoCategory';
 import type { Transaction, Category, BankCategoryResult } from './types';
 
 function stripBOM(text: string): string {
@@ -273,9 +273,11 @@ export function importCSV(rawText: string, categories: Category[] = []): Transac
 
     if (bankResolved?.exclude) {
       const account = getField(map, row, 'account') || undefined;
+      const dn = cleanDescription(description);
       transactions.push({
         id: `import_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
         date, description,
+        ...(dn && { displayName: dn }),
         amount: Math.round(amount * 100) / 100,
         category: fallbackExpense,
         ...(account && { account }),
@@ -314,9 +316,11 @@ export function importCSV(rawText: string, categories: Category[] = []): Transac
 
     const excluded = isTransfer(description);
     const account  = getField(map, row, 'account') || undefined;
+    const dn       = cleanDescription(description);
     transactions.push({
       id: `import_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
       date, description,
+      ...(dn            && { displayName: dn }),
       amount: Math.round(amount * 100) / 100,
       category: catName,
       ...(account       && { account }),

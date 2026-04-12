@@ -11,7 +11,7 @@ import {
   loadFlatBudget, saveFlatBudget,
   loadCarryOver, saveCarryOver,
   loadDarkMode, saveDarkMode,
-  loadMerchantRules, addMerchantRule,
+  loadMerchantRules, addMerchantRule, deleteMerchantRule, updateMerchantRule,
 } from './storage';
 import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules } from './autoCategory';
 
@@ -58,6 +58,8 @@ interface BudgetContextValue {
   batchEditTxs: (changes: Array<{ id: string; updates: Partial<Transaction> }>) => void;
   splitTx: (parentId: string, splits: Array<{ description: string; amount: number; category: string }>) => void;
   createMerchantRule: (description: string, category: string) => void;
+  deleteMerchantRule: (description: string) => void;
+  updateMerchantRule: (oldDesc: string, newDesc: string, category: string) => void;
 
   // Goals
   addGoal: (g: Omit<Goal, 'id'>) => void;
@@ -154,6 +156,16 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
 
   const createMerchantRule = useCallback((description: string, category: string) => {
     addMerchantRule(description, category);
+    setMerchantRules(loadMerchantRules());
+  }, []);
+
+  const deleteMerchantRuleFn = useCallback((description: string) => {
+    deleteMerchantRule(description);
+    setMerchantRules(loadMerchantRules());
+  }, []);
+
+  const updateMerchantRuleFn = useCallback((oldDesc: string, newDesc: string, category: string) => {
+    updateMerchantRule(oldDesc, newDesc, category);
     setMerchantRules(loadMerchantRules());
   }, []);
 
@@ -296,6 +308,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       txs, categories, budget, carryOver, dark, dateRange, goals, merchantRules,
       filteredTxs,
       addTx, deleteTx, editTx, importTxs, excludeTx, batchEditTxs, splitTx, createMerchantRule,
+      deleteMerchantRule: deleteMerchantRuleFn, updateMerchantRule: updateMerchantRuleFn,
       addGoal, updateGoal, deleteGoal,
       updateBudget, toggleCarryOver,
       addCategory, deleteCategory, editCategory,
