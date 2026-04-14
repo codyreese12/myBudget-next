@@ -5,7 +5,7 @@ import { useBudget } from '@/lib/BudgetContext';
 import { getCategoryColor, getCategoriesByType } from '@/lib/constants';
 import { importCSV } from '@/lib/csvImport';
 import { cleanDescription } from '@/lib/autoCategory';
-import type { Transaction, Category, MerchantRules } from '@/lib/types';
+import type { Transaction, Category, MerchantRules, ChangeHistoryEntry } from '@/lib/types';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function usd(n: number, d = 2) {
@@ -26,6 +26,9 @@ function hexToRgba(hex: string, a: number) {
   if (!hex || !hex.startsWith('#')) return `rgba(120,120,120,${a})`;
   const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
   return `rgba(${r},${g},${b},${a})`;
+}
+function fmtHistoryDate(iso: string) {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 function loadUserTags(): string[] {
   try { return JSON.parse(localStorage.getItem('userTags') ?? 'null') || []; } catch { return []; }
@@ -371,13 +374,35 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   const removeTag = (t: string) => {
     const next = tags.filter((x) => x !== t);
     setTags(next);
-    onEdit(tx.id, { tags: next });
+    const entry: ChangeHistoryEntry = {
+      field: 'Tags',
+      oldValue: tags.join(', ') || 'none',
+      newValue: next.join(', ') || 'none',
+      timestamp: new Date().toISOString(),
+    };
+    onEdit(tx.id, { tags: next, changeHistory: [entry] });
   };
 
   const save = () => {
     const catChanged = cat !== tx.category;
     const dn = displayName.trim() || undefined;
-    onEdit(tx.id, { category: cat, notes, tags, needsReview: false, displayName: dn });
+    const now = new Date().toISOString();
+    const newEntries: ChangeHistoryEntry[] = [];
+    if (catChanged) {
+      newEntries.push({ field: 'Category', oldValue: tx.category, newValue: cat, timestamp: now });
+    }
+    if (notes !== (tx.notes ?? '')) {
+      newEntries.push({ field: 'Notes', oldValue: tx.notes ?? '', newValue: notes, timestamp: now });
+    }
+    const oldTagsKey = [...(tx.tags ?? [])].sort().join(',');
+    const newTagsKey = [...tags].sort().join(',');
+    if (oldTagsKey !== newTagsKey) {
+      newEntries.push({ field: 'Tags', oldValue: (tx.tags ?? []).join(', ') || 'none', newValue: tags.join(', ') || 'none', timestamp: now });
+    }
+    if (dn !== tx.displayName) {
+      newEntries.push({ field: 'Description', oldValue: tx.displayName ?? '', newValue: dn ?? '', timestamp: now });
+    }
+    onEdit(tx.id, { category: cat, notes, tags, needsReview: false, displayName: dn, ...(newEntries.length > 0 && { changeHistory: newEntries }) });
     if (catChanged) onCategoryChanged?.(tx.description, cat);
     onClose();
   };
@@ -527,6 +552,34 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
               {tx.excluded ? 'Include in totals' : 'Exclude from totals'}
             </button>
           </div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}>
+            <div
+              onClick={() => onEdit(tx.id, { taxDeductible: !tx.taxDeductible })}
+              style={{ position: 'relative', width: 36, height: 20, borderRadius: 99, background: tx.taxDeductible ? 'var(--green)' : 'var(--border)', cursor: 'pointer', flexShrink: 0, transition: 'background 0.2s' }}>
+              <div style={{ position: 'absolute', top: 2, left: tx.taxDeductible ? 18 : 2, width: 16, height: 16, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+            </div>
+            <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Tax Deductible</span>
+          </label>
+
+          {(tx.changeHistory?.length ?? 0) > 0 && (
+            <details style={{ borderTop: '1px solid var(--border-2)', paddingTop: 14 }}>
+              <summary style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-2)', cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6, userSelect: 'none' }}>
+                <svg width={10} height={10} viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <path d="M2 4l3 3 3-3" />
+                </svg>
+                History
+              </summary>
+              <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {[...tx.changeHistory!].reverse().map((entry, i) => (
+                  <p key={i} style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5, margin: 0 }}>
+                    {entry.field} changed from <span style={{ color: 'var(--text-2)' }}>{entry.oldValue || 'empty'}</span> to <span style={{ color: 'var(--text-2)' }}>{entry.newValue || 'empty'}</span>
+                    <span style={{ marginLeft: 4, opacity: 0.7 }}>· {fmtHistoryDate(entry.timestamp)}</span>
+                  </p>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
 
         <div style={{ padding: '14px 20px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
@@ -666,6 +719,7 @@ export default function Transactions() {
   const [catFilters,      setCatFilters]      = useState(new Set<string>());
   const [tagFilters,      setTagFilters]      = useState(new Set<string>());
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [taxDeductOnly,   setTaxDeductOnly]   = useState(false);
   const [search,          setSearch]          = useState('');
   const [sort,            setSort]            = useState('date-desc');
   const [minAmt,          setMinAmt]          = useState('');
@@ -686,12 +740,24 @@ export default function Transactions() {
   const [merchantPrompt,  setMerchantPrompt]  = useState<{ descs: string[]; cat: string } | null>(null);
   const [showRules,       setShowRules]       = useState(false);
   const [ruleSuggestion,  setRuleSuggestion]  = useState<{ desc: string; cat: string } | null>(null);
-  const [presets,         setPresets]         = useState<FilterPreset[]>([]);
-  const [savePresetOpen,  setSavePresetOpen]  = useState(false);
-  const [presetName,      setPresetName]      = useState('');
+  const [presets,            setPresets]            = useState<FilterPreset[]>([]);
+  const [savePresetOpen,     setSavePresetOpen]     = useState(false);
+  const [presetName,         setPresetName]         = useState('');
+  const [showRunningBalance, setShowRunningBalance] = useState(false);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
   useEffect(() => { setPresets(loadPresets()); }, []);
+  useEffect(() => {
+    try { setShowRunningBalance(localStorage.getItem('showRunningBalance') === 'true'); } catch { /* */ }
+  }, []);
+
+  const toggleRunningBalance = useCallback(() => {
+    setShowRunningBalance((v) => {
+      const next = !v;
+      try { localStorage.setItem('showRunningBalance', String(next)); } catch { /* */ }
+      return next;
+    });
+  }, []);
 
   // ── Auto-suggest rules ─────────────────────────────────────────────────────
   // Keep a synchronous ref so callbacks always see the latest rules without
@@ -759,6 +825,7 @@ export default function Transactions() {
       if (catFilters.size > 0) return catFilters.has(t.category);
       return true;
     })
+    .filter((t) => !taxDeductOnly || !!t.taxDeductible)
     .filter((t) => tagFilters.size === 0 || (t.tags ?? []).some((tag) => tagFilters.has(tag)))
     .filter((t) => !search || (t.displayName || cleanDescription(t.description) || t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.description || '').toLowerCase().includes(search.toLowerCase()))
     .filter((t) => {
@@ -785,6 +852,26 @@ export default function Transactions() {
     groups[tx.date].push(tx);
   }
 
+  // Running balance — computed chronologically over the filtered set regardless of sort order
+  const runningBalanceMap = useMemo((): Map<string, number> => {
+    if (!showRunningBalance) return new Map();
+    const chrono = [...filtered].sort((a, b) =>
+      new Date(a.date + 'T00:00:00').getTime() - new Date(b.date + 'T00:00:00').getTime()
+    );
+    const map = new Map<string, number>();
+    let balance = 0;
+    for (const tx of chrono) {
+      balance -= tx.amount; // positive amount = expense (decreases), negative = income (increases)
+      map.set(tx.id, balance);
+    }
+    return map;
+  }, [showRunningBalance, filtered]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const multipleAccounts = useMemo(() => {
+    if (!showRunningBalance) return false;
+    return new Set(filtered.map((t) => t.account).filter(Boolean)).size > 1;
+  }, [showRunningBalance, filtered]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const anySelected = selectedIds.size > 0;
   const allVisibleSelected = sorted.length > 0 && sorted.every((t) => selectedIds.has(t.id));
 
@@ -794,12 +881,21 @@ export default function Transactions() {
   const needsReviewCount = filteredTxs.filter((t) => t.needsReview && !t.reviewed).length;
 
   const handleExport = () => {
-    const header = 'Date,Description,Amount,Category,Account,Tags';
-    const rows = sorted.map((t) => [t.date, `"${(t.description ?? '').replace(/"/g, '""')}"`, t.amount, t.category, t.account ?? '', (t.tags ?? []).join(';')].join(','));
+    const exportRows = taxDeductOnly ? sorted.filter((t) => !!t.taxDeductible) : sorted;
+    const header = 'Date,Description,Amount,Category,Account,Tags,TaxDeductible';
+    const rows = exportRows.map((t) => [
+      t.date,
+      `"${(t.description ?? '').replace(/"/g, '""')}"`,
+      t.amount,
+      t.category,
+      t.account ?? '',
+      (t.tags ?? []).join(';'),
+      t.taxDeductible ? 'true' : 'false',
+    ].join(','));
     const csv  = [header, ...rows].join('\n');
     const url  = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a    = document.createElement('a');
-    a.href = url; a.download = 'transactions.csv'; a.click();
+    a.href = url; a.download = taxDeductOnly ? 'transactions-tax-deductible.csv' : 'transactions.csv'; a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -912,7 +1008,7 @@ export default function Transactions() {
 
   const catItems = categories.map((c) => ({ id: c.name, label: c.name, color: getCategoryColor(c.name, categories) }));
   const tagItems = allTagsList.map((t) => ({ id: t, label: `#${t}` }));
-  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || needsReviewOnly;
+  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || needsReviewOnly || taxDeductOnly;
 
   const ctrl = (extra: React.CSSProperties = {}): React.CSSProperties => ({
     height: 36, fontSize: 12, display: 'flex', alignItems: 'center', gap: 5,
@@ -1004,6 +1100,9 @@ export default function Transactions() {
         <button onClick={openTagFilter} style={{ ...ctrl(), border: `1px solid ${tagFilters.size > 0 ? 'var(--accent)' : 'var(--border)'}`, color: tagFilters.size > 0 ? 'var(--accent)' : 'var(--text-1)' }}>
           <Icon d={IC.tag} size={11} /> {tagFilters.size > 0 ? `Tags · ${tagFilters.size}` : 'Tags'} <Icon d={IC.chevD} size={10} />
         </button>
+        <button onClick={() => setTaxDeductOnly((v) => !v)} style={{ ...ctrl(), border: `1px solid ${taxDeductOnly ? 'rgba(52,211,153,0.5)' : 'var(--border)'}`, color: taxDeductOnly ? 'var(--green)' : 'var(--text-1)', background: taxDeductOnly ? 'rgba(52,211,153,0.08)' : 'var(--card)' }}>
+          Tax
+        </button>
         <select value={sort} onChange={(e) => setSort(e.target.value)} style={ctrl({ paddingRight: 6 })}>
           <option value="date-desc">Newest</option>
           <option value="date-asc">Oldest</option>
@@ -1014,7 +1113,7 @@ export default function Transactions() {
         <input type="number" placeholder="Min $" value={minAmt} onChange={(e) => setMinAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         <input type="number" placeholder="Max $" value={maxAmt} onChange={(e) => setMaxAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         {filterActive && (
-          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setNeedsReviewOnly(false); }}
+          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setNeedsReviewOnly(false); setTaxDeductOnly(false); }}
             style={{ height: 36, fontSize: 11, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'none', color: 'var(--text-3)', cursor: 'pointer', flexShrink: 0 }}>Clear</button>
         )}
         <button onClick={() => { setSavePresetOpen((v) => !v); setPresetName(''); }}
@@ -1023,15 +1122,24 @@ export default function Transactions() {
         </button>
       </div>
 
-      {/* Needs-review badge */}
-      {needsReviewCount > 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <button onClick={() => setNeedsReviewOnly((v) => !v)}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: needsReviewOnly ? 'rgba(245,162,0,0.15)' : 'rgba(245,162,0,0.08)', color: 'var(--amber)', border: `1px solid ${needsReviewOnly ? 'rgba(245,162,0,0.4)' : 'rgba(245,162,0,0.2)'}` }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--amber)', display: 'inline-block' }} />
-            {needsReviewCount} to review
-            {needsReviewOnly && <span style={{ opacity: 0.6, marginLeft: 2 }}>× clear</span>}
-          </button>
+      {/* Filter pills row */}
+      {(needsReviewCount > 0 || taxDeductOnly) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+          {needsReviewCount > 0 && (
+            <button onClick={() => setNeedsReviewOnly((v) => !v)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: needsReviewOnly ? 'rgba(245,162,0,0.15)' : 'rgba(245,162,0,0.08)', color: 'var(--amber)', border: `1px solid ${needsReviewOnly ? 'rgba(245,162,0,0.4)' : 'rgba(245,162,0,0.2)'}` }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--amber)', display: 'inline-block' }} />
+              {needsReviewCount} to review
+              {needsReviewOnly && <span style={{ opacity: 0.6, marginLeft: 2 }}>× clear</span>}
+            </button>
+          )}
+          {taxDeductOnly && (
+            <button onClick={() => setTaxDeductOnly(false)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: 'rgba(52,211,153,0.12)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.3)' }}>
+              Tax deductible only
+              <span style={{ opacity: 0.6 }}>× clear</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -1064,6 +1172,23 @@ export default function Transactions() {
           </div>
         </div>
       )}
+
+      {/* Transaction list header row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
+        {showRunningBalance && multipleAccounts && (
+          <span style={{ fontSize: 11, color: 'var(--amber)', flex: 1 }}>
+            ⚠ Multiple accounts detected — balance shown across all accounts combined
+          </span>
+        )}
+        <button
+          onClick={toggleRunningBalance}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: showRunningBalance ? 'rgba(91,87,245,0.1)' : 'transparent', color: showRunningBalance ? 'var(--accent)' : 'var(--text-3)', border: `1px solid ${showRunningBalance ? 'rgba(91,87,245,0.3)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
+          <svg width={10} height={10} viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M1 9V5M3.5 9V1M6 9V3M8.5 9V7" />
+          </svg>
+          Running Balance
+        </button>
+      </div>
 
       {/* Transaction list */}
       {sorted.length === 0 ? (
@@ -1137,6 +1262,12 @@ export default function Transactions() {
                           {tx.isDuplicate && (
                             <span title="Possible duplicate" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(245,162,0,0.12)', color: 'var(--amber)', border: '1px solid rgba(245,162,0,0.25)', flexShrink: 0 }}>~dup</span>
                           )}
+                          {tx.isRecurring && !isExcluded && (
+                            <span title={`Recurring · ${tx.recurringFrequency}`} style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(91,87,245,0.09)', color: 'var(--accent)', border: '1px solid rgba(91,87,245,0.2)', flexShrink: 0 }}>↻ {tx.recurringFrequency}</span>
+                          )}
+                          {tx.taxDeductible && !isExcluded && (
+                            <span title="Tax deductible" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(52,211,153,0.1)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.25)', flexShrink: 0 }}>Tax</span>
+                          )}
                           {tx.account && !isExcluded && (
                             <span style={{ fontSize: 10, color: 'var(--text-3)', opacity: 0.55, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{tx.account}</span>
                           )}
@@ -1158,10 +1289,15 @@ export default function Transactions() {
                         )}
                       </div>
 
-                      <div style={{ flexShrink: 0, textAlign: 'right' }}>
+                      <div style={{ flexShrink: 0, textAlign: 'right', minWidth: showRunningBalance ? 88 : undefined }}>
                         <span style={{ fontSize: 13, fontWeight: 600, color: isExcluded ? 'var(--text-3)' : txIsIncome ? 'var(--green)' : 'var(--text-1)' }}>
                           {!isExcluded && (txIsIncome ? '+' : '-')}{usd(tx.amount, 2)}
                         </span>
+                        {showRunningBalance && runningBalanceMap.has(tx.id) && (
+                          <p style={{ fontSize: 10, fontWeight: 500, marginTop: 2, color: (runningBalanceMap.get(tx.id)! >= 0) ? 'var(--green)' : 'var(--red)', opacity: isExcluded ? 0.4 : 0.75 }}>
+                            {(runningBalanceMap.get(tx.id)! >= 0 ? '' : '–')}{usd(Math.abs(runningBalanceMap.get(tx.id)!))}
+                          </p>
+                        )}
                       </div>
                     </div>
                   );
@@ -1198,7 +1334,8 @@ export default function Transactions() {
           <InlineCatPopover pos={inlineCat.pos} tx={tx} categories={categories}
             onSelect={(cat) => {
               if (cat !== tx.category) {
-                editTx(tx.id, { category: cat, needsReview: false });
+                const entry: ChangeHistoryEntry = { field: 'Category', oldValue: tx.category, newValue: cat, timestamp: new Date().toISOString() };
+                editTx(tx.id, { category: cat, needsReview: false, changeHistory: [entry] });
                 setMerchantPrompt({ descs: [tx.description], cat });
                 recordCategorization(tx.description, cat);
               }

@@ -13,6 +13,13 @@ export interface Category {
   builtIn: boolean;
 }
 
+export interface ChangeHistoryEntry {
+  field: string;
+  oldValue: string;
+  newValue: string;
+  timestamp: string; // ISO
+}
+
 export interface Transaction {
   id: string;
   date: string;           // ISO YYYY-MM-DD
@@ -31,6 +38,10 @@ export interface Transaction {
   needsReview?: boolean;
   reviewed?: boolean;
   isDuplicate?: boolean;
+  isRecurring?: boolean;
+  recurringFrequency?: string;  // 'Monthly' | 'Recurring' | 'Occasional'
+  changeHistory?: ChangeHistoryEntry[];
+  taxDeductible?: boolean;
 }
 
 export interface SplitChild {

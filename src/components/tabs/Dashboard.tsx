@@ -4,7 +4,6 @@ import { useMemo, useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { useBudget } from '@/lib/BudgetContext';
 import { getCategoryColor } from '@/lib/constants';
-import { isTransfer } from '@/lib/autoCategory';
 import type { Transaction, Category } from '@/lib/types';
 
 // ── Chart.js — dynamic import to avoid SSR issues ─────────────────────────────
@@ -28,7 +27,7 @@ const VISIBILITY_KEY = 'budget_widget_visibility';
 interface LayoutItem { i: string; x: number; y: number; w: number; h: number; }
 interface NwItem    { id: number; name: string; amount: number; }
 interface NetWorthData { assets: NwItem[]; liabilities: NwItem[]; }
-interface RecurringItem { description: string; avgAmount: number; category: string; months: number; frequency: string; }
+interface RecurringItem { description: string; avgAmount: number; category: string; frequency: string; }
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
 function loadLayout(): LayoutItem[] | null {
@@ -558,40 +557,29 @@ function WidgetNetWorth() {
 // ══════════════════════════════════════════════════════════════════════════════
 // Widget G — Recurring Bills
 // ══════════════════════════════════════════════════════════════════════════════
-function detectRecurring(allTransactions: Transaction[]): RecurringItem[] {
-  const groups: Record<string, Transaction[]> = {};
-  allTransactions
-    .filter(t => !t.excluded && t.amount > 0)
-    .forEach(t => {
-      const key = (t.description || '').toLowerCase().trim()
-        .replace(/[^a-z0-9\s]/g, '')
-        .replace(/\s+/g, ' ');
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(t);
-    });
-
-  const recurring: RecurringItem[] = [];
-  for (const txs of Object.values(groups)) {
-    const months = new Set(txs.map(t => t.date.slice(0, 7)));
-    if (months.size < 2) continue;
-    const amounts = txs.map(t => Math.abs(t.amount));
-    const avg = amounts.reduce((a, b) => a + b) / amounts.length;
-    const allClose = amounts.every(a => Math.abs(a - avg) / avg < 0.05);
-    if (!allClose) continue;
-    if (isTransfer(txs[0].description)) continue;
-    recurring.push({
-      description: txs[0].description,
-      avgAmount:   avg,
-      category:    txs[0].category,
-      months:      months.size,
-      frequency:   months.size >= 10 ? 'Monthly' : months.size >= 4 ? 'Recurring' : 'Occasional',
-    });
-  }
-  return recurring.sort((a, b) => b.avgAmount - a.avgAmount);
-}
-
 function WidgetRecurring({ allTransactions, categories }: { allTransactions: Transaction[]; categories: Category[] }) {
-  const recurring = useMemo(() => detectRecurring(allTransactions), [allTransactions]);
+  const recurring = useMemo((): RecurringItem[] => {
+    const groups = new Map<string, Transaction[]>();
+    allTransactions
+      .filter((t) => t.isRecurring && !t.excluded && t.amount > 0)
+      .forEach((t) => {
+        const key = (t.description || '').toLowerCase().trim();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(t);
+      });
+    return Array.from(groups.values())
+      .map((txs) => {
+        const amounts = txs.map((t) => Math.abs(t.amount));
+        const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+        return {
+          description: txs[0].description,
+          avgAmount:   avg,
+          category:    txs[0].category,
+          frequency:   txs[0].recurringFrequency ?? 'Recurring',
+        };
+      })
+      .sort((a, b) => b.avgAmount - a.avgAmount);
+  }, [allTransactions]);
 
   if (!recurring.length) return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-3)' }}>

@@ -4,7 +4,7 @@ import {
   createContext, useContext, useState, useEffect, useCallback,
   useRef, type ReactNode,
 } from 'react';
-import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange } from './types';
+import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange, ChangeHistoryEntry } from './types';
 import {
   loadTransactions, saveTransactions,
   loadCategories, saveCategories,
@@ -13,7 +13,47 @@ import {
   loadDarkMode, saveDarkMode,
   loadMerchantRules, addMerchantRule, deleteMerchantRule, updateMerchantRule,
 } from './storage';
-import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules } from './autoCategory';
+import { DEFAULT_CATEGORIES, DEFAULT_BUDGETS } from './constants';
+import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules, isTransfer } from './autoCategory';
+
+// ── Recurring transaction detection ───────────────────────────────────────────
+function normalizeDesc(d: string): string {
+  return (d || '').toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+}
+
+export function tagRecurring(txs: Transaction[]): Transaction[] {
+  // Group eligible (non-excluded, expense) transactions by normalized description
+  const groups = new Map<string, Transaction[]>();
+  for (const t of txs) {
+    if (t.excluded || t.amount <= 0) continue;
+    const key = normalizeDesc(t.description);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(t);
+  }
+
+  // Find which transaction ids qualify as recurring
+  const recurringIds = new Map<string, string>(); // id → frequency label
+  for (const group of groups.values()) {
+    const months = new Set(group.map((t) => t.date.slice(0, 7)));
+    if (months.size < 2) continue;
+    const amounts = group.map((t) => Math.abs(t.amount));
+    const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+    if (!amounts.every((a) => Math.abs(a - avg) / avg < 0.05)) continue;
+    if (isTransfer(group[0].description)) continue;
+    const freq = months.size >= 10 ? 'Monthly' : months.size >= 4 ? 'Recurring' : 'Occasional';
+    for (const t of group) recurringIds.set(t.id, freq);
+  }
+
+  return txs.map((t) => {
+    const freq = recurringIds.get(t.id);
+    if (freq) {
+      if (t.isRecurring && t.recurringFrequency === freq) return t;
+      return { ...t, isRecurring: true, recurringFrequency: freq };
+    }
+    if (!t.isRecurring && t.recurringFrequency === undefined) return t;
+    return { ...t, isRecurring: false, recurringFrequency: undefined };
+  });
+}
 
 // ── Date range helpers ─────────────────────────────────────────────────────────
 function startOfDay(d: Date): Date { const r = new Date(d); r.setHours(0,0,0,0); return r; }
@@ -92,9 +132,10 @@ export function useBudget(): BudgetContextValue {
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 export function BudgetProvider({ children }: { children: ReactNode }) {
+  const [initialized,  setInitialized]  = useState(false);
   const [txs,          setTxs]          = useState<Transaction[]>([]);
-  const [categories,   setCategories]   = useState<Category[]>([]);
-  const [budget,       setBudget]       = useState<Budget>({});
+  const [categories,   setCategories]   = useState<Category[]>(() => DEFAULT_CATEGORIES.map((c) => ({ ...c })));
+  const [budget,       setBudget]       = useState<Budget>(() => ({ ...DEFAULT_BUDGETS }));
   const [carryOver,    setCarryOver]    = useState<CarryOver>({});
   const [dark,         setDark]         = useState(false);
   const [dateRange,    setDateRange]    = useState<DateRange>(() => ({
@@ -105,7 +146,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
 
   // Hydrate from localStorage on mount (client only)
   useEffect(() => {
-    setTxs(loadTransactions());
+    setTxs(tagRecurring(loadTransactions()));
     setCategories(loadCategories());
     setBudget(loadFlatBudget());
     setCarryOver(loadCarryOver());
@@ -117,20 +158,23 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       const g = JSON.parse(localStorage.getItem('budget_goals') ?? 'null');
       setGoals(Array.isArray(g) ? g : []);
     } catch { /* empty */ }
+    setInitialized(true);
   }, []);
 
-  // Persist on change
-  useEffect(() => { saveTransactions(txs); }, [txs]);
-  useEffect(() => { saveCategories(categories); }, [categories]);
-  useEffect(() => { saveFlatBudget(budget); }, [budget]);
-  useEffect(() => { saveCarryOver(carryOver); }, [carryOver]);
+  // Persist on change — gated on initialized to prevent writing empty initial
+  // state to localStorage before hydration has loaded the real saved data.
+  useEffect(() => { if (initialized) saveTransactions(txs); }, [initialized, txs]);
+  useEffect(() => { if (initialized) saveCategories(categories); }, [initialized, categories]);
+  useEffect(() => { if (initialized) saveFlatBudget(budget); }, [initialized, budget]);
+  useEffect(() => { if (initialized) saveCarryOver(carryOver); }, [initialized, carryOver]);
   useEffect(() => {
+    if (!initialized) return;
     saveDarkMode(dark);
     document.documentElement.classList.toggle('dark', dark);
-  }, [dark]);
+  }, [initialized, dark]);
   useEffect(() => {
-    localStorage.setItem('budget_goals', JSON.stringify(goals));
-  }, [goals]);
+    if (initialized) localStorage.setItem('budget_goals', JSON.stringify(goals));
+  }, [initialized, goals]);
 
   // Date-filtered transactions
   const filteredTxs = txs.filter((t) => {
@@ -151,7 +195,15 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   txsRef.current = txs;
 
   const editTx = useCallback((id: string, updates: Partial<Transaction>) => {
-    setTxs((p) => p.map((t) => (t.id === id ? { ...t, ...updates } : t)));
+    setTxs((p) => p.map((t) => {
+      if (t.id !== id) return t;
+      const { changeHistory: newEntries, ...rest } = updates;
+      const merged: Transaction = { ...t, ...rest };
+      if (newEntries?.length) {
+        merged.changeHistory = [...(t.changeHistory ?? []), ...newEntries];
+      }
+      return merged;
+    }));
   }, []);
 
   const createMerchantRule = useCallback((description: string, category: string) => {
@@ -226,15 +278,24 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
         if (aiCat) return { ...t, category: aiCat, categorizedBy: 'ai', needsReview: true };
         return t;
       });
-      setTxs((prev) => [...withAI, ...prev]);
+      setTxs((prev) => tagRecurring([...withAI, ...prev]));
     } else {
-      setTxs((prev) => [...processed, ...prev]);
+      setTxs((prev) => tagRecurring([...processed, ...prev]));
     }
     return { imported: unique.length, exactDups, fuzzyDups };
   }, []);
 
   const excludeTx = useCallback((id: string, excluded: boolean) => {
-    setTxs((p) => p.map((t) => (t.id === id ? { ...t, excluded } : t)));
+    setTxs((p) => p.map((t) => {
+      if (t.id !== id) return t;
+      const entry: ChangeHistoryEntry = {
+        field: 'Excluded',
+        oldValue: t.excluded ? 'true' : 'false',
+        newValue: excluded ? 'true' : 'false',
+        timestamp: new Date().toISOString(),
+      };
+      return { ...t, excluded, changeHistory: [...(t.changeHistory ?? []), entry] };
+    }));
   }, []);
 
   const batchEditTxs = useCallback(
