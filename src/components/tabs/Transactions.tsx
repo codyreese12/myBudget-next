@@ -147,8 +147,36 @@ const IC = {
   check:  'M2 7l4 4 6-6',
   edit:   'M9.5 2.5l2 2L5 11H3V9l6.5-6.5zM10 4l-2-2',
   rules:  'M2 3.5h10M2 7h7M2 10.5h8',
-  save:   'M2 12V2.5A.5.5 0 012.5 2h7l2.5 2.5V12a.5.5 0 01-.5.5H2.5A.5.5 0 012 12zM5 12V8h4v4M5 2v3h5V2',
+  save:      'M2 12V2.5A.5.5 0 012.5 2h7l2.5 2.5V12a.5.5 0 01-.5.5H2.5A.5.5 0 012 12zM5 12V8h4v4M5 2v3h5V2',
+  paperclip: 'M11.5 4.5v6a4 4 0 01-8 0V3a2.5 2.5 0 015 0v7a1 1 0 01-2 0V4.5',
 };
+
+// ── Attachment storage ─────────────────────────────────────────────────────────
+const ATTACHMENTS_KEY = 'budget_attachments';
+
+interface Attachment {
+  id: string;
+  name: string;
+  type: string;
+  size: number;  // bytes
+  data: string;  // base64 data URL
+}
+
+function loadAllAttachments(): Record<string, Attachment[]> {
+  try { return JSON.parse(localStorage.getItem(ATTACHMENTS_KEY) ?? 'null') || {}; } catch { return {}; }
+}
+function loadAttachmentsForTx(txId: string): Attachment[] {
+  return loadAllAttachments()[txId] ?? [];
+}
+function saveAttachmentsForTx(txId: string, attachments: Attachment[]): void {
+  const all = loadAllAttachments();
+  if (attachments.length === 0) delete all[txId]; else all[txId] = attachments;
+  localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(all));
+}
+function txsWithAttachmentsSet(): Set<string> {
+  const all = loadAllAttachments();
+  return new Set(Object.entries(all).filter(([, v]) => v.length > 0).map(([k]) => k));
+}
 
 // ── Filter Presets ─────────────────────────────────────────────────────────────
 interface FilterPreset {
@@ -462,7 +490,7 @@ function InlineCatPopover({ pos, tx, categories, onSelect, onClose }: { pos: DOM
 }
 
 // ── Detail slide-in panel ──────────────────────────────────────────────────────
-function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule }: {
+function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule, onAttachmentsChanged }: {
   tx: Transaction; categories: Category[]; allTxs: Transaction[];
   onEdit: (id: string, u: Partial<Transaction>) => void;
   onDelete: (id: string) => void;
@@ -474,6 +502,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   onCategoryChanged?: (desc: string, cat: string) => void;
   splitRules?: SplitRules;
   onCreateSplitRule?: (rule: SplitRule) => void;
+  onAttachmentsChanged?: () => void;
 }) {
   const [visible,          setVisible]          = useState(false);
   const [cat,              setCat]              = useState(tx.category);
@@ -483,14 +512,53 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   const [tagInput,         setTagInput]         = useState('');
   const [splitting,        setSplitting]        = useState(false);
   const [applyRuleConfirm, setApplyRuleConfirm] = useState(false);
+  const [attachments,      setAttachments]      = useState<Attachment[]>(() => loadAttachmentsForTx(tx.id));
+  const [sizeWarning,      setSizeWarning]      = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
-  useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); }, [tx.id]); // eslint-disable-line
+  useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); setAttachments(loadAttachmentsForTx(tx.id)); setSizeWarning(null); }, [tx.id]); // eslint-disable-line
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', h);
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    for (const file of files) {
+      if (file.size > 2 * 1024 * 1024) {
+        setSizeWarning(`"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — exceeds the 2 MB limit and may cause localStorage issues.`);
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const att: Attachment = {
+          id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: file.name, type: file.type, size: file.size,
+          data: ev.target?.result as string,
+        };
+        setAttachments((prev) => {
+          const next = [...prev, att];
+          saveAttachmentsForTx(tx.id, next);
+          onAttachmentsChanged?.();
+          return next;
+        });
+        setSizeWarning(null);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const removeAttachment = (attId: string) => {
+    setAttachments((prev) => {
+      const next = prev.filter((a) => a.id !== attId);
+      saveAttachmentsForTx(tx.id, next);
+      onAttachmentsChanged?.();
+      return next;
+    });
+  };
 
   const isIncome    = catType(cat, categories) === 'income';
   const catColor    = getCategoryColor(cat, categories);
@@ -759,6 +827,55 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
             <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Transfer (auto-excluded)</span>
           </label>
 
+          {/* Attachments */}
+          <div style={{ borderTop: '1px solid var(--border-2)', paddingTop: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <label className="label" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <Icon d={IC.paperclip} size={11} />
+                Attachments{attachments.length > 0 && <span style={{ color: 'var(--text-3)', fontWeight: 400 }}> · {attachments.length}</span>}
+              </label>
+              <button onClick={() => fileInputRef.current?.click()}
+                style={{ fontSize: 11, color: 'var(--accent)', background: 'rgba(91,87,245,0.07)', border: '1px solid rgba(91,87,245,0.2)', borderRadius: 5, padding: '3px 9px', cursor: 'pointer' }}>
+                + Add
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/*,.pdf" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
+            </div>
+            {sizeWarning && (
+              <p style={{ fontSize: 11, color: 'var(--red)', marginBottom: 8, lineHeight: 1.4 }}>⚠ {sizeWarning}</p>
+            )}
+            {attachments.length === 0 ? (
+              <p style={{ fontSize: 12, color: 'var(--text-3)' }}>No attachments — click Add to upload an image or PDF.</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {attachments.map((att) => (
+                  <div key={att.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 7, background: 'var(--bg)', border: '1px solid var(--border)' }}>
+                    {att.type.startsWith('image/') ? (
+                      <img src={att.data} alt={att.name} onClick={() => window.open(att.data, '_blank')}
+                        style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 5, flexShrink: 0, cursor: 'pointer' }} />
+                    ) : (
+                      <div onClick={() => window.open(att.data, '_blank')}
+                        style={{ width: 44, height: 44, borderRadius: 5, background: 'rgba(242,70,58,0.09)', border: '1px solid rgba(242,70,58,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: 'pointer' }}>
+                        <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                        </svg>
+                      </div>
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontSize: 12, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.name}</p>
+                      <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 1 }}>{(att.size / 1024).toFixed(0)} KB</p>
+                    </div>
+                    <button onClick={() => removeAttachment(att.id)} title="Remove attachment"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                      <Icon d={IC.close} size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {(tx.changeHistory?.length ?? 0) > 0 && (
             <details style={{ borderTop: '1px solid var(--border-2)', paddingTop: 14 }}>
               <summary style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-2)', cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6, userSelect: 'none' }}>
@@ -1000,8 +1117,10 @@ export default function Transactions() {
   const [presets,            setPresets]            = useState<FilterPreset[]>([]);
   const [savePresetOpen,     setSavePresetOpen]     = useState(false);
   const [presetName,         setPresetName]         = useState('');
-  const [showRunningBalance, setShowRunningBalance] = useState(false);
-  const [recurringPopover,   setRecurringPopover]   = useState<{ tx: Transaction; anchor: DOMRect } | null>(null);
+  const [showRunningBalance,  setShowRunningBalance]  = useState(false);
+  const [recurringPopover,    setRecurringPopover]    = useState<{ tx: Transaction; anchor: DOMRect } | null>(null);
+  const [attachedTxIds,       setAttachedTxIds]       = useState<Set<string>>(() => { try { return txsWithAttachmentsSet(); } catch { return new Set(); } });
+  const refreshAttachmentSet = useCallback(() => { try { setAttachedTxIds(txsWithAttachmentsSet()); } catch { /* */ } }, []);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
   useEffect(() => { setPresets(loadPresets()); }, []);
@@ -1523,6 +1642,11 @@ export default function Transactions() {
                           {tx.isTransfer && (
                             <span title="Transfer — excluded from totals" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(59,130,246,0.1)', color: '#3b82f6', border: '1px solid rgba(59,130,246,0.25)', flexShrink: 0 }}>⇄ Transfer</span>
                           )}
+                          {attachedTxIds.has(tx.id) && (
+                            <span title="Has attachments" style={{ display: 'flex', alignItems: 'center', color: 'var(--text-3)', flexShrink: 0 }}>
+                              <Icon d={IC.paperclip} size={10} />
+                            </span>
+                          )}
                           {tx.isRecurring && !isExcluded && (
                             <button
                               title={`Recurring · ${tx.recurringFrequency} — click to see all occurrences`}
@@ -1622,7 +1746,8 @@ export default function Transactions() {
           onEdit={editTx} onDelete={deleteTx} onExclude={excludeTx} onSplit={splitTx}
           onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags}
           onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }}
-          splitRules={splitRules} onCreateSplitRule={createSplitRule} />
+          splitRules={splitRules} onCreateSplitRule={createSplitRule}
+          onAttachmentsChanged={refreshAttachmentSet} />
       )}
 
       {recurringPopover && (
