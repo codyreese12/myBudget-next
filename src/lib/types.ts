@@ -43,6 +43,8 @@ export interface Transaction {
   isTransfer?: boolean;
   changeHistory?: ChangeHistoryEntry[];
   taxDeductible?: boolean;
+  groupId?: string;
+  groupName?: string;
 }
 
 export interface SplitChild {

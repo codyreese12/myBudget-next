@@ -1111,6 +1111,11 @@ export default function Transactions() {
   const [bulkTagOpen,     setBulkTagOpen]     = useState(false);
   const [bulkTagValue,    setBulkTagValue]    = useState('');
   const [deleteConfirm,   setDeleteConfirm]   = useState(false);
+  const [groupFilters,    setGroupFilters]    = useState(new Set<string>());
+  const [groupFilterOpen, setGroupFilterOpen] = useState(false);
+  const [groupFilterRect, setGroupFilterRect] = useState<DOMRect | null>(null);
+  const [bulkGroupOpen,   setBulkGroupOpen]   = useState(false);
+  const [bulkGroupValue,  setBulkGroupValue]  = useState('');
   const [merchantPrompt,  setMerchantPrompt]  = useState<{ descs: string[]; cat: string } | null>(null);
   const [showRules,       setShowRules]       = useState(false);
   const [ruleSuggestion,  setRuleSuggestion]  = useState<{ desc: string; cat: string } | null>(null);
@@ -1192,6 +1197,7 @@ export default function Transactions() {
 
   const usedTagIds = useMemo(() => new Set(allTxs.flatMap((t) => t.tags ?? [])), [allTxs]);
   const unusedTagIds = useMemo(() => new Set(allTagsList.filter((t) => !usedTagIds.has(t))), [allTagsList, usedTagIds]);
+  const allGroupsList = useMemo(() => [...new Set(allTxs.map((t) => t.groupName).filter(Boolean) as string[])].sort(), [allTxs]);
   const handleDeleteTag = useCallback((tagId: string) => {
     handleUpdateUserTags(userTags.filter((t) => t !== tagId));
   }, [userTags, handleUpdateUserTags]);
@@ -1204,6 +1210,7 @@ export default function Transactions() {
     })
     .filter((t) => !taxDeductOnly || !!t.taxDeductible)
     .filter((t) => tagFilters.size === 0 || (t.tags ?? []).some((tag) => tagFilters.has(tag)))
+    .filter((t) => groupFilters.size === 0 || (t.groupName ? groupFilters.has(t.groupName) : false))
     .filter((t) => !search || (t.displayName || cleanDescription(t.description) || t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.description || '').toLowerCase().includes(search.toLowerCase()))
     .filter((t) => {
       const abs = Math.abs(t.amount);
@@ -1345,8 +1352,19 @@ export default function Transactions() {
     setSelectedIds(new Set());
   }, [selectedIds, allTxs, batchEditTxs, userTags, handleUpdateUserTags]);
 
-  const openCatFilter = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); };
-  const openTagFilter = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); };
+  const handleBulkGroup = useCallback((groupName: string) => {
+    const g = groupName.trim();
+    if (!g) return;
+    const groupId = g.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    batchEditTxs([...selectedIds].map((id) => ({ id, updates: { groupId, groupName: g } })));
+    setBulkGroupOpen(false);
+    setBulkGroupValue('');
+    setSelectedIds(new Set());
+  }, [selectedIds, batchEditTxs]);
+
+  const openCatFilter = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); setGroupFilterOpen(false); };
+  const openTagFilter = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); setGroupFilterOpen(false); };
+  const openGroupFilter = (e: React.MouseEvent) => { setGroupFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setGroupFilterOpen((v) => !v); setCatFilterOpen(false); setTagFilterOpen(false); };
 
   const handleSavePreset = useCallback(() => {
     const name = presetName.trim();
@@ -1385,7 +1403,7 @@ export default function Transactions() {
 
   const catItems = categories.map((c) => ({ id: c.name, label: c.name, color: getCategoryColor(c.name, categories) }));
   const tagItems = allTagsList.map((t) => ({ id: t, label: `#${t}` }));
-  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || needsReviewOnly || taxDeductOnly;
+  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || groupFilters.size > 0 || needsReviewOnly || taxDeductOnly;
 
   const ctrl = (extra: React.CSSProperties = {}): React.CSSProperties => ({
     height: 36, fontSize: 12, display: 'flex', alignItems: 'center', gap: 5,
@@ -1477,6 +1495,9 @@ export default function Transactions() {
         <button onClick={openTagFilter} style={{ ...ctrl(), border: `1px solid ${tagFilters.size > 0 ? 'var(--accent)' : 'var(--border)'}`, color: tagFilters.size > 0 ? 'var(--accent)' : 'var(--text-1)' }}>
           <Icon d={IC.tag} size={11} /> {tagFilters.size > 0 ? `Tags · ${tagFilters.size}` : 'Tags'} <Icon d={IC.chevD} size={10} />
         </button>
+        <button onClick={openGroupFilter} style={{ ...ctrl(), border: `1px solid ${groupFilters.size > 0 ? 'rgba(168,85,247,0.6)' : 'var(--border)'}`, color: groupFilters.size > 0 ? '#a855f7' : 'var(--text-1)' }}>
+          {groupFilters.size > 0 ? `Group · ${groupFilters.size}` : 'Group'} <Icon d={IC.chevD} size={10} />
+        </button>
         <button onClick={() => setTaxDeductOnly((v) => !v)} style={{ ...ctrl(), border: `1px solid ${taxDeductOnly ? 'rgba(52,211,153,0.5)' : 'var(--border)'}`, color: taxDeductOnly ? 'var(--green)' : 'var(--text-1)', background: taxDeductOnly ? 'rgba(52,211,153,0.08)' : 'var(--card)' }}>
           Tax
         </button>
@@ -1490,7 +1511,7 @@ export default function Transactions() {
         <input type="number" placeholder="Min $" value={minAmt} onChange={(e) => setMinAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         <input type="number" placeholder="Max $" value={maxAmt} onChange={(e) => setMaxAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         {filterActive && (
-          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setNeedsReviewOnly(false); setTaxDeductOnly(false); }}
+          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setGroupFilters(new Set()); setNeedsReviewOnly(false); setTaxDeductOnly(false); }}
             style={{ height: 36, fontSize: 11, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'none', color: 'var(--text-3)', cursor: 'pointer', flexShrink: 0 }}>Clear</button>
         )}
         <button onClick={() => { setSavePresetOpen((v) => !v); setPresetName(''); }}
@@ -1500,8 +1521,15 @@ export default function Transactions() {
       </div>
 
       {/* Filter pills row */}
-      {(needsReviewCount > 0 || taxDeductOnly) && (
+      {(needsReviewCount > 0 || taxDeductOnly || groupFilters.size > 0) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+          {[...groupFilters].map((g) => (
+            <button key={g} onClick={() => setGroupFilters((p) => { const n = new Set(p); n.delete(g); return n; })}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: 'rgba(168,85,247,0.1)', color: '#a855f7', border: '1px solid rgba(168,85,247,0.3)' }}>
+              ⊞ {g}
+              <span style={{ opacity: 0.6 }}>× clear</span>
+            </button>
+          ))}
           {needsReviewCount > 0 && (
             <button onClick={() => setNeedsReviewOnly((v) => !v)}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: needsReviewOnly ? 'rgba(245,162,0,0.15)' : 'rgba(245,162,0,0.08)', color: 'var(--amber)', border: `1px solid ${needsReviewOnly ? 'rgba(245,162,0,0.4)' : 'rgba(245,162,0,0.2)'}` }}>
@@ -1664,6 +1692,9 @@ export default function Transactions() {
                           {tx.taxDeductible && !isExcluded && (
                             <span title="Tax deductible" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(52,211,153,0.1)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.25)', flexShrink: 0 }}>Tax</span>
                           )}
+                          {tx.groupName && !isExcluded && (
+                            <span title={`Group: ${tx.groupName}`} style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(168,85,247,0.1)', color: '#a855f7', border: '1px solid rgba(168,85,247,0.25)', flexShrink: 0 }}>⊞ {tx.groupName}</span>
+                          )}
                           {tx.account && !isExcluded && (
                             <span style={{ fontSize: 10, color: 'var(--text-3)', opacity: 0.55, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{tx.account}</span>
                           )}
@@ -1723,6 +1754,12 @@ export default function Transactions() {
           deletableIds={unusedTagIds} onDeleteItem={handleDeleteTag} />
       )}
 
+      {groupFilterOpen && groupFilterRect && (
+        <FilterPopover pos={groupFilterRect} items={allGroupsList.map((g) => ({ id: g, label: `⊞ ${g}` }))} selected={groupFilters}
+          onToggle={(id) => setGroupFilters((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; })}
+          onClear={() => setGroupFilters(new Set())} onClose={() => setGroupFilterOpen(false)} title="Groups" />
+      )}
+
       {inlineCat && (() => {
         const tx = allTxs.find((t) => t.id === inlineCat.txId);
         if (!tx) return null;
@@ -1770,6 +1807,7 @@ export default function Transactions() {
           <div style={{ flex: 1 }} />
           <button onClick={() => setBulkCatOpen(true)} className="btn" style={{ fontSize: 12 }}>Recategorize</button>
           <button onClick={() => setBulkTagOpen(true)} className="btn" style={{ fontSize: 12 }}>Add tag</button>
+          <button onClick={() => setBulkGroupOpen(true)} className="btn" style={{ fontSize: 12 }}>Group</button>
           <button onClick={handleBulkToggleExclude} className="btn" style={{ fontSize: 12 }}>Exclude/Include</button>
           <button onClick={() => setDeleteConfirm(true)} className="btn" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(242,70,58,0.3)' }}>Delete</button>
           <button onClick={() => setSelectedIds(new Set())} style={{ fontSize: 13, color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', lineHeight: 1 }}>✕</button>
@@ -1803,6 +1841,29 @@ export default function Transactions() {
               style={{ flex: 1, height: 34, fontSize: 13, padding: '0 10px', borderRadius: 7, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
             <button onClick={() => handleBulkAddTag(bulkTagValue)} className="btn btn-primary" style={{ fontSize: 12 }}>Add</button>
           </div>
+        </Modal>
+      )}
+
+      {/* Bulk group modal */}
+      {bulkGroupOpen && (
+        <Modal title={`Group ${selectedIds.size} transaction${selectedIds.size !== 1 ? 's' : ''}`} onClose={() => setBulkGroupOpen(false)}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input autoFocus type="text" placeholder="Group name" value={bulkGroupValue}
+              onChange={(e) => setBulkGroupValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleBulkGroup(bulkGroupValue); }}
+              style={{ flex: 1, height: 34, fontSize: 13, padding: '0 10px', borderRadius: 7, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+            <button onClick={() => handleBulkGroup(bulkGroupValue)} className="btn btn-primary" style={{ fontSize: 12 }}>Group</button>
+          </div>
+          {allGroupsList.length > 0 && (
+            <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+              {allGroupsList.map((g) => (
+                <button key={g} onClick={() => handleBulkGroup(g)}
+                  style={{ fontSize: 11, padding: '3px 9px', borderRadius: 99, border: '1px solid rgba(168,85,247,0.3)', background: 'rgba(168,85,247,0.08)', color: '#a855f7', cursor: 'pointer' }}>
+                  ⊞ {g}
+                </button>
+              ))}
+            </div>
+          )}
         </Modal>
       )}
 
