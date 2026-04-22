@@ -6,6 +6,7 @@ import { getCategoryColor, getCategoriesByType } from '@/lib/constants';
 import { importCSV } from '@/lib/csvImport';
 import { cleanDescription } from '@/lib/autoCategory';
 import type { Transaction, Category, MerchantRules, ChangeHistoryEntry, SplitRule, SplitRules } from '@/lib/types';
+import { useKeyboardShortcuts } from '@/lib/useKeyboardShortcuts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function usd(n: number, d = 2) {
@@ -1125,6 +1126,7 @@ export default function Transactions() {
   const [showRunningBalance,  setShowRunningBalance]  = useState(false);
   const [recurringPopover,    setRecurringPopover]    = useState<{ tx: Transaction; anchor: DOMRect } | null>(null);
   const [attachedTxIds,       setAttachedTxIds]       = useState<Set<string>>(() => { try { return txsWithAttachmentsSet(); } catch { return new Set(); } });
+  const [showShortcuts,       setShowShortcuts]       = useState(false);
   const refreshAttachmentSet = useCallback(() => { try { setAttachedTxIds(txsWithAttachmentsSet()); } catch { /* */ } }, []);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
@@ -1140,6 +1142,67 @@ export default function Transactions() {
       return next;
     });
   }, []);
+
+  // ── Keyboard shortcuts ─────────────────────────────────────────────────────
+  useKeyboardShortcuts([
+    {
+      key: 'n',
+      handler: () => { setShowAdd(true); },
+    },
+    {
+      key: 'f',
+      handler: () => { searchRef.current?.focus(); searchRef.current?.select(); },
+    },
+    {
+      key: '/',
+      handler: () => { searchRef.current?.focus(); searchRef.current?.select(); },
+    },
+    {
+      key: 'r',
+      handler: () => {
+        setCatFilters(new Set()); setTagFilters(new Set()); setGroupFilters(new Set());
+        setNeedsReviewOnly(false); setTaxDeductOnly(false);
+        setSearch(''); setSort('date-desc'); setMinAmt(''); setMaxAmt('');
+        setSelectedIds(new Set());
+      },
+    },
+    {
+      key: '?',
+      handler: () => { setShowShortcuts((v) => !v); },
+    },
+    {
+      key: 'a',
+      meta: true,
+      handler: () => {
+        setSelectedIds((prev) =>
+          prev.size === sorted.length && sorted.every((t) => prev.has(t.id))
+            ? new Set()
+            : new Set(sorted.map((t) => t.id))
+        );
+      },
+    },
+    {
+      key: 'Escape',
+      handler: () => {
+        if (showShortcuts)       { setShowShortcuts(false); return; }
+        if (showAdd)             { setShowAdd(false); return; }
+        if (deleteConfirm)       { setDeleteConfirm(false); return; }
+        if (bulkCatOpen)         { setBulkCatOpen(false); return; }
+        if (bulkTagOpen)         { setBulkTagOpen(false); return; }
+        if (bulkGroupOpen)       { setBulkGroupOpen(false); return; }
+        if (showRules)           { setShowRules(false); return; }
+        if (savePresetOpen)      { setSavePresetOpen(false); setPresetName(''); return; }
+        if (merchantPrompt)      { setMerchantPrompt(null); return; }
+        if (recurringPopover)    { setRecurringPopover(null); return; }
+        if (catFilterOpen)       { setCatFilterOpen(false); return; }
+        if (tagFilterOpen)       { setTagFilterOpen(false); return; }
+        if (groupFilterOpen)     { setGroupFilterOpen(false); return; }
+        if (inlineCat)           { setInlineCat(null); return; }
+        if (selectedId)          { setSelectedId(null); return; }
+        if (selectedIds.size > 0){ setSelectedIds(new Set()); return; }
+      },
+    },
+  ]);
 
   // ── Auto-suggest rules ─────────────────────────────────────────────────────
   // Keep a synchronous ref so callbacks always see the latest rules without
@@ -1182,7 +1245,8 @@ export default function Transactions() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const fileRef = useRef<HTMLInputElement>(null);
+  const fileRef   = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const selectedTx = selectedId ? (allTxs.find((t) => t.id === selectedId) ?? null) : null;
 
   const handleUpdateUserTags = useCallback((tags: string[]) => {
@@ -1486,7 +1550,7 @@ export default function Transactions() {
             style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', pointerEvents: 'none' }}>
             <circle cx="6" cy="6" r="4"/><path d="M10 10l2.5 2.5"/>
           </svg>
-          <input type="text" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)}
+          <input ref={searchRef} type="text" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)}
             style={{ width: '100%', height: 36, paddingLeft: 30, paddingRight: 10, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12, color: 'var(--text-1)', boxSizing: 'border-box' }} />
         </div>
         <button onClick={openCatFilter} style={{ ...ctrl(), border: `1px solid ${catFilters.size > 0 ? 'var(--accent)' : 'var(--border)'}`, color: catFilters.size > 0 ? 'var(--accent)' : 'var(--text-1)' }}>
@@ -1906,6 +1970,31 @@ export default function Transactions() {
             }} className="btn btn-primary" style={{ fontSize: 11 }}>Yes</button>
           </div>
         </div>
+      )}
+
+      {/* Keyboard shortcuts modal */}
+      {showShortcuts && (
+        <Modal title="Keyboard shortcuts" onClose={() => setShowShortcuts(false)} maxWidth={420}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {([
+              ['N',       undefined, 'Add a new transaction'],
+              ['F',       undefined, 'Focus the search bar'],
+              ['/',       undefined, 'Focus the search bar'],
+              ['R',       undefined, 'Reset all filters'],
+              ['?',       undefined, 'Toggle this shortcuts panel'],
+              ['Esc',     undefined, 'Close open panel / modal'],
+              ['⌘ / Ctrl', 'A',     'Select all visible transactions'],
+            ] as [string, string | undefined, string][]).map(([key, key2, label]) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 4px', borderBottom: '1px solid var(--border-2)' }}>
+                <span style={{ fontSize: 13, color: 'var(--text-2)' }}>{label}</span>
+                <span style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  <kbd style={{ fontSize: 11, fontFamily: 'monospace', padding: '2px 7px', borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }}>{key}</kbd>
+                  {key2 && <kbd style={{ fontSize: 11, fontFamily: 'monospace', padding: '2px 7px', borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }}>{key2}</kbd>}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Modal>
       )}
 
       <style>{`@keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
