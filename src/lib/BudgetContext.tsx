@@ -184,6 +184,10 @@ interface BudgetContextValue {
   // Dark mode
   setDark: (d: boolean | ((prev: boolean) => boolean)) => void;
 
+  // Privacy mode
+  privacyMode: boolean;
+  togglePrivacyMode: () => void;
+
   // Date range
   setDateRange: (dr: DateRange) => void;
 }
@@ -210,6 +214,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   const [goals,        setGoals]        = useState<Goal[]>([]);
   const [merchantRules, setMerchantRules] = useState<MerchantRules>({});
   const [splitRules,    setSplitRules]    = useState<SplitRules>({});
+  const [privacyMode,   setPrivacyMode]   = useState(false);
 
   // Hydrate from localStorage on mount (client only)
   useEffect(() => {
@@ -222,6 +227,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     const dm = loadDarkMode();
     setDark(dm);
     document.documentElement.classList.toggle('dark', dm);
+    try { setPrivacyMode(localStorage.getItem('budget_privacy') === 'true'); } catch { /* */ }
     try {
       const g = JSON.parse(localStorage.getItem('budget_goals') ?? 'null');
       setGoals(Array.isArray(g) ? g : []);
@@ -243,6 +249,9 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (initialized) localStorage.setItem('budget_goals', JSON.stringify(goals));
   }, [initialized, goals]);
+  useEffect(() => {
+    if (initialized) try { localStorage.setItem('budget_privacy', String(privacyMode)); } catch { /* */ }
+  }, [initialized, privacyMode]);
 
   // Date-filtered transactions
   const filteredTxs = txs.filter((t) => {
@@ -425,6 +434,9 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     setCarryOver((p) => ({ ...p, [cat]: enabled }));
   }, []);
 
+  // ── Privacy ──
+  const togglePrivacyMode = useCallback(() => setPrivacyMode((v) => !v), []);
+
   // ── Categories ──
   const addCategory = useCallback((cat: Omit<Category, 'id' | 'builtIn'>) => {
     setCategories((p) => [...p, { ...cat, id: `custom_${Date.now()}`, builtIn: false }]);
@@ -453,6 +465,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       updateBudget, toggleCarryOver,
       addCategory, deleteCategory, editCategory,
       setDark, setDateRange,
+      privacyMode, togglePrivacyMode,
     }}>
       {children}
     </BudgetContext.Provider>

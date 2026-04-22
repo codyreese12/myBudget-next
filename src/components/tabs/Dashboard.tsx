@@ -139,6 +139,8 @@ function Widget({ title, children, style = {} }: { title?: string; children: Rea
 
 // ── Inline-editable number ────────────────────────────────────────────────────
 function EditableAmount({ value, onSave }: { value: number; onSave: (v: number) => void }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 0) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [on, setOn]   = useState(false);
   const [val, setVal] = useState('');
   const ref = useRef<HTMLInputElement>(null);
@@ -168,6 +170,8 @@ function EditableAmount({ value, onSave }: { value: number; onSave: (v: number) 
 // Widget A — Stat Cards
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetStats({ transactions, categories }: { transactions: Transaction[]; categories: Category[] }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 0) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const { income, spent } = useMemo(() => {
     const income = transactions.filter(t => !t.excluded && catType(t.category, categories) === 'income').reduce((s, t) => s + Math.abs(t.amount), 0);
     const spent  = transactions.filter(t => !t.excluded && catType(t.category, categories) === 'expense').reduce((s, t) => s + Math.abs(t.amount), 0);
@@ -201,6 +205,8 @@ function WidgetStats({ transactions, categories }: { transactions: Transaction[]
 // Widget B — Spending by Category (Donut)
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetDonut({ transactions, categories }: { transactions: Transaction[]; categories: Category[] }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 0) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [isDark, setIsDark] = useState(false);
   useEffect(() => { setIsDark(document.documentElement.classList.contains('dark')); }, []);
 
@@ -257,6 +263,8 @@ function WidgetDonut({ transactions, categories }: { transactions: Transaction[]
 // Widget C — Budget Progress
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetBudget({ transactions, categories, budget }: { transactions: Transaction[]; categories: Category[]; budget: Record<string, number> }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 0) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const byCategory = useMemo(() => {
     const m: Record<string, number> = {};
     transactions.filter(t => !t.excluded && catType(t.category, categories) === 'expense')
@@ -296,6 +304,7 @@ function WidgetBudget({ transactions, categories, budget }: { transactions: Tran
 // Widget D — Recent Transactions
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetRecent({ transactions, categories }: { transactions: Transaction[]; categories: Category[] }) {
+  const { privacyMode } = useBudget();
   const recent = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 8);
   if (!recent.length) return <p style={{ fontSize: 12, color: 'var(--text-3)', paddingTop: 20 }}>No transactions.</p>;
   return (
@@ -310,7 +319,7 @@ function WidgetRecent({ transactions, categories }: { transactions: Transaction[
               <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 1 }}>{tx.category}</p>
             </div>
             <span style={{ fontSize: 12, fontWeight: 600, color: isIncome ? 'var(--green)' : 'var(--text-1)', flexShrink: 0 }}>
-              {isIncome ? '+' : '-'}${Math.abs(tx.amount).toFixed(2)}
+              {privacyMode ? '••••' : `${isIncome ? '+' : '-'}$${Math.abs(tx.amount).toFixed(2)}`}
             </span>
           </div>
         );
@@ -323,6 +332,7 @@ function WidgetRecent({ transactions, categories }: { transactions: Transaction[
 // Widget E — Spending Trends
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetTrends({ allTransactions, categories, budget }: { allTransactions: Transaction[]; categories: Category[]; budget: Record<string, number> }) {
+  const { privacyMode } = useBudget();
   const [view, setView] = useState<'spending' | 'cashflow'>('spending');
   const [isDark, setIsDark] = useState(false);
   useEffect(() => { setIsDark(document.documentElement.classList.contains('dark')); }, []);
@@ -420,11 +430,11 @@ function WidgetTrends({ allTransactions, categories, budget }: { allTransactions
     borderWidth: 1, titleColor: isDark ? '#f0f0f3' : '#111114',
     bodyColor: isDark ? '#7a7a85' : '#6b6b76',
     padding: 8, cornerRadius: 8,
-    callbacks: { label: (ctx: { parsed: { y: number } }) => ` $${(ctx.parsed.y || 0).toLocaleString()}` },
+    callbacks: { label: (ctx: { parsed: { y: number } }) => privacyMode ? ' ••••' : ` $${(ctx.parsed.y || 0).toLocaleString()}` },
   };
   const commonScales = {
     x: { grid: { color: gridColor }, ticks: { color: tickColor, font: { size: 10 } }, border: { display: false } },
-    y: { grid: { color: gridColor }, ticks: { color: tickColor, font: { size: 10 }, callback: (v: number | string) => '$' + Number(v).toLocaleString() }, border: { display: false } },
+    y: { grid: { color: gridColor }, ticks: { color: tickColor, font: { size: 10 }, callback: (v: number | string) => privacyMode ? '••••' : '$' + Number(v).toLocaleString() }, border: { display: false } },
   };
 
   const dailyChartData = {
@@ -477,9 +487,9 @@ function WidgetTrends({ allTransactions, categories, budget }: { allTransactions
       </div>
       {view === 'spending' && (
         <div style={{ display: 'flex', gap: 16, marginTop: 10, flexShrink: 0 }}>
-          <span style={{ fontSize: 12, color: '#5b57f5', fontWeight: 600 }}>${daily.totalSpent.toFixed(2)} spent</span>
+          <span style={{ fontSize: 12, color: '#5b57f5', fontWeight: 600 }}>{privacyMode ? '••••' : `$${daily.totalSpent.toFixed(2)}`} spent</span>
           <span style={{ fontSize: 12, fontWeight: 600, color: left >= 0 ? 'var(--green)' : 'var(--red)' }}>
-            ${Math.abs(left).toFixed(2)} {left >= 0 ? 'left' : 'over budget'}
+            {privacyMode ? '••••' : `$${Math.abs(left).toFixed(2)}`} {left >= 0 ? 'left' : 'over budget'}
           </span>
         </div>
       )}
@@ -491,6 +501,8 @@ function WidgetTrends({ allTransactions, categories, budget }: { allTransactions
 // Widget F — Net Worth
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetNetWorth() {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 0) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [nw, setNw] = useState<NetWorthData>({ assets: [], liabilities: [] });
   const [loaded, setLoaded] = useState(false);
 
@@ -558,6 +570,7 @@ function WidgetNetWorth() {
 // Widget G — Recurring Bills
 // ══════════════════════════════════════════════════════════════════════════════
 function WidgetRecurring({ allTransactions, categories }: { allTransactions: Transaction[]; categories: Category[] }) {
+  const { privacyMode } = useBudget();
   const recurring = useMemo((): RecurringItem[] => {
     const groups = new Map<string, Transaction[]>();
     allTransactions
@@ -596,7 +609,7 @@ function WidgetRecurring({ allTransactions, categories }: { allTransactions: Tra
             <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</p>
             <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 1 }}>{r.frequency} · {r.category}</p>
           </div>
-          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)', flexShrink: 0 }}>${r.avgAmount.toFixed(2)}/mo</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)', flexShrink: 0 }}>{privacyMode ? '••••' : `$${r.avgAmount.toFixed(2)}`}/mo</span>
         </div>
       ))}
     </div>

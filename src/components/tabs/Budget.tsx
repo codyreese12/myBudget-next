@@ -10,6 +10,8 @@ function usd(n: number, d = 2) {
 }
 
 function EditableAmount({ value, onSave }: { value: number; onSave: (v: number) => void }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [on,  setOn]  = useState(false);
   const [val, setVal] = useState('');
   const ref = useRef<HTMLInputElement>(null);
@@ -110,6 +112,8 @@ interface SectionProps {
 }
 
 function Section({ title, type, categories, budget, spending, carryOver, onUpdateBudget, onToggleCarryOver, onAddCategory, onDeleteCategory, onEditCategory }: SectionProps) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState<Category | null>(null);
   const isIncome = type === 'income';
@@ -231,7 +235,7 @@ function Section({ title, type, categories, budget, spending, carryOver, onUpdat
 }
 
 export default function Budget() {
-  const { filteredTxs, categories, budget, carryOver, updateBudget, toggleCarryOver, addCategory, deleteCategory, editCategory } = useBudget();
+  const { filteredTxs, categories, budget, carryOver, updateBudget, toggleCarryOver, addCategory, deleteCategory, editCategory, privacyMode } = useBudget();
 
   const spending = useMemo(() => {
     const m: Record<string, number> = {};
@@ -252,7 +256,7 @@ export default function Budget() {
   const totalSpent  = expenseCats.reduce((s, c) => s + (spending[c.name] || 0), 0);
   const netCashFlow = totalIncome - totalSpent;
 
-  const usdFmt = (n: number) => '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const usdFmt = (n: number) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const sharedProps = { budget, spending, carryOver, onUpdateBudget: updateBudget, onToggleCarryOver: toggleCarryOver, onAddCategory: addCategory, onDeleteCategory: deleteCategory, onEditCategory: editCategory };
 

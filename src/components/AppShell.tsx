@@ -24,6 +24,8 @@ const IC = {
   moon:         'M13 7a5 5 0 11-8.9-3.1A6 6 0 1013 7z',
   sun:          'M8 1v1m0 12v1M1 8h1m12 0h1M3 3l.7.7m8.6 8.6.7.7M3 13l.7-.7m8.6-8.6.7-.7M8 5a3 3 0 100 6 3 3 0 000-6z',
   menu:         'M1 4h14M1 8h14M1 12h14',
+  eye:          'M1 8s3-5.5 7-5.5S15 8 15 8s-3 5.5-7 5.5S1 8 1 8zm7-2a2 2 0 100 4 2 2 0 000-4z',
+  eyeOff:       'M1 1l14 14M6.7 6.7A2 2 0 0010.3 10.3M3.4 3.4C2.1 4.5 1 6 1 8s3 5.5 7 5.5c1.5 0 2.9-.4 4.1-1.1M6 2.6C6.6 2.5 7.3 2.5 8 2.5c4 0 7 5.5 7 5.5s-.8 1.4-2.1 2.7',
 };
 
 const NAV = [
@@ -186,6 +188,7 @@ function Sidebar({ onNav }: { onNav?: () => void }) {
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileNav, setMobileNav] = useState(false);
+  const { privacyMode, togglePrivacyMode } = useBudget();
 
   const currentLabel = NAV.find((n) => n.href === pathname)?.label ?? 'Dashboard';
 
@@ -221,7 +224,21 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             <style>{`@media(min-width:768px){.md-hide{display:none!important}}`}</style>
             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)' }}>{currentLabel}</span>
           </div>
-          <DateRangePicker />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              onClick={togglePrivacyMode}
+              title={privacyMode ? 'Disable privacy mode' : 'Enable privacy mode (hide amounts)'}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 32, height: 32, borderRadius: 8, border: `1px solid ${privacyMode ? 'var(--accent)' : 'var(--border)'}`,
+                background: privacyMode ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent',
+                color: privacyMode ? 'var(--accent)' : 'var(--text-3)',
+                cursor: 'pointer', transition: 'all 0.15s', flexShrink: 0,
+              }}>
+              <Icon d={privacyMode ? IC.eyeOff : IC.eye} size={15} />
+            </button>
+            <DateRangePicker />
+          </div>
         </header>
 
         <main style={{ flex: 1, overflowY: 'auto', padding: 24 }}>

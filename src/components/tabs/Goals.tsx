@@ -18,6 +18,8 @@ function StatCard({ label, value, color }: { label: string; value: string; color
 }
 
 function EditableValue({ value, onSave, color = 'var(--text-1)' }: { value: number; onSave: (v: number) => void; color?: string }) {
+  const { privacyMode } = useBudget();
+  const money = (n: number) => privacyMode ? '••••' : '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const [editing, setEditing] = useState(false);
   const [val,     setVal]     = useState('');
 
@@ -141,7 +143,8 @@ function AddGoalModal({ onAdd, onClose }: { onAdd: (g: Omit<Goal, 'id'>) => void
 }
 
 export default function Goals() {
-  const { goals, addGoal, updateGoal, deleteGoal } = useBudget();
+  const { goals, addGoal, updateGoal, deleteGoal, privacyMode } = useBudget();
+  const money = (n: number) => privacyMode ? '••••' : '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const [showAdd, setShowAdd] = useState(false);
 
   const totalSaved  = goals.reduce((s, g) => s + g.current, 0);

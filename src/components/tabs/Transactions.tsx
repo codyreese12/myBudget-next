@@ -69,6 +69,8 @@ function RecurringPopover({
   anchor: DOMRect;
   onClose: () => void;
 }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const ref = useRef<HTMLDivElement>(null);
   const key = normalizeKey(tx.description);
   const occurrences = allTxs
@@ -291,6 +293,8 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   splitRules?: SplitRules;
   onCreateSplitRule?: (rule: SplitRule) => void;
 }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const expenseCats = getCategoriesByType(categories, 'expense');
   const incomeCats  = getCategoriesByType(categories, 'income');
   const isIncome    = catType(tx.category, categories) === 'income';
@@ -373,8 +377,8 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   return (
     <Modal title="Split transaction" onClose={onClose} maxWidth={480}>
       <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 16 }}>
-        Total: <strong style={{ color: 'var(--text-1)' }}>${total.toFixed(2)}</strong>
-        {diff !== 0 && <span style={{ color: 'var(--red)', marginLeft: 8 }}>remaining: ${Math.abs(diff).toFixed(2)}</span>}
+        Total: <strong style={{ color: 'var(--text-1)' }}>{privacyMode ? '••••' : `$${total.toFixed(2)}`}</strong>
+        {diff !== 0 && <span style={{ color: 'var(--red)', marginLeft: 8 }}>remaining: {privacyMode ? '••••' : `$${Math.abs(diff).toFixed(2)}`}</span>}
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
         {splits.map((s, i) => (
@@ -505,6 +509,8 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   onCreateSplitRule?: (rule: SplitRule) => void;
   onAttachmentsChanged?: () => void;
 }) {
+  const { privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const [visible,          setVisible]          = useState(false);
   const [cat,              setCat]              = useState(tx.category);
   const [displayName,      setDisplayName]      = useState(tx.displayName ?? '');
@@ -1087,7 +1093,8 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule, privacyMode } = useBudget();
+  const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 
   const [showAdd,         setShowAdd]         = useState(false);
   const [selectedId,      setSelectedId]      = useState<string | null>(null);
