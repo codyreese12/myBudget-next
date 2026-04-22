@@ -40,6 +40,7 @@ export interface Transaction {
   isDuplicate?: boolean;
   isRecurring?: boolean;
   recurringFrequency?: string;  // 'Monthly' | 'Recurring' | 'Occasional'
+  isTransfer?: boolean;
   changeHistory?: ChangeHistoryEntry[];
   taxDeductible?: boolean;
 }
@@ -77,6 +78,22 @@ export interface NetWorth {
   assets: NetWorthEntry[];
   liabilities: NetWorthEntry[];
 }
+
+// ── Split rules ────────────────────────────────────────────────────────────────
+
+export interface SplitRuleEntry {
+  description: string;
+  percentage: number;   // 0–100, derived from amount / total at save time
+  category: string;
+}
+
+export interface SplitRule {
+  merchantKey: string;
+  displayName: string;
+  splits: SplitRuleEntry[];
+}
+
+export type SplitRules = Record<string, SplitRule>;
 
 // ── Import helpers ─────────────────────────────────────────────────────────────
 

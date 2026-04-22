@@ -4,7 +4,7 @@ import {
   createContext, useContext, useState, useEffect, useCallback,
   useRef, type ReactNode,
 } from 'react';
-import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange, ChangeHistoryEntry } from './types';
+import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange, ChangeHistoryEntry, SplitRule, SplitRules } from './types';
 import {
   loadTransactions, saveTransactions,
   loadCategories, saveCategories,
@@ -12,6 +12,7 @@ import {
   loadCarryOver, saveCarryOver,
   loadDarkMode, saveDarkMode,
   loadMerchantRules, addMerchantRule, deleteMerchantRule, updateMerchantRule,
+  loadSplitRules, addSplitRule, removeSplitRule,
 } from './storage';
 import { DEFAULT_CATEGORIES, DEFAULT_BUDGETS } from './constants';
 import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules, isTransfer } from './autoCategory';
@@ -19,6 +20,28 @@ import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules, isTransfer }
 // ── Recurring transaction detection ───────────────────────────────────────────
 function normalizeDesc(d: string): string {
   return (d || '').toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+}
+
+const VARIABLE_MERCHANT_KEYWORDS = [
+  'coffee', 'starbucks', 'dunkin',
+  'gas', 'fuel',
+  'grocery', 'safeway', 'kroger', 'walmart', 'target',
+  'mcdonald', 'chipotle', 'restaurant', 'cafe', 'diner',
+];
+
+function isVariableMerchant(desc: string): boolean {
+  const normalized = normalizeDesc(desc);
+  return VARIABLE_MERCHANT_KEYWORDS.some((kw) => normalized.includes(kw));
+}
+
+function hasEvenSpacing(dates: string[]): boolean {
+  const sorted = [...dates].sort();
+  const ms = sorted.map((d) => new Date(d).getTime());
+  const gaps: number[] = [];
+  for (let i = 1; i < ms.length; i++) {
+    gaps.push((ms[i] - ms[i - 1]) / (1000 * 60 * 60 * 24));
+  }
+  return gaps.every((g) => g >= 25 && g <= 40);
 }
 
 export function tagRecurring(txs: Transaction[]): Transaction[] {
@@ -35,11 +58,15 @@ export function tagRecurring(txs: Transaction[]): Transaction[] {
   const recurringIds = new Map<string, string>(); // id → frequency label
   for (const group of groups.values()) {
     const months = new Set(group.map((t) => t.date.slice(0, 7)));
-    if (months.size < 2) continue;
+    // Require at least 3 distinct months
+    if (months.size < 3) continue;
     const amounts = group.map((t) => Math.abs(t.amount));
     const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
     if (!amounts.every((a) => Math.abs(a - avg) / avg < 0.05)) continue;
     if (isTransfer(group[0].description)) continue;
+    if (isVariableMerchant(group[0].description)) continue;
+    // For monthly cadence, verify gaps between occurrences are evenly spaced
+    if (!hasEvenSpacing(group.map((t) => t.date))) continue;
     const freq = months.size >= 10 ? 'Monthly' : months.size >= 4 ? 'Recurring' : 'Occasional';
     for (const t of group) recurringIds.set(t.id, freq);
   }
@@ -52,6 +79,40 @@ export function tagRecurring(txs: Transaction[]): Transaction[] {
     }
     if (!t.isRecurring && t.recurringFrequency === undefined) return t;
     return { ...t, isRecurring: false, recurringFrequency: undefined };
+  });
+}
+
+// ── Transfer pair detection ────────────────────────────────────────────────────
+const TRANSFER_PAIR_KW = /\btransfer\b|xfer|\bzelle\b|\bvenmo\b|cashapp|cash\s?app|\bpaypal\b/i;
+
+function detectTransferPairs(txs: Transaction[]): Transaction[] {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  // Only consider transactions with transfer-like keywords that haven't been
+  // explicitly un-marked by the user (isTransfer === false)
+  const candidates = txs.filter((t) => TRANSFER_PAIR_KW.test(t.description) && t.isTransfer !== false);
+
+  const matchedIds = new Set<string>();
+  for (let i = 0; i < candidates.length; i++) {
+    if (matchedIds.has(candidates[i].id)) continue;
+    const a = candidates[i];
+    const aAmt  = Math.round(Math.abs(a.amount) * 100);
+    const aTime = new Date(a.date + 'T00:00:00').getTime();
+    for (let j = i + 1; j < candidates.length; j++) {
+      if (matchedIds.has(candidates[j].id)) continue;
+      const b = candidates[j];
+      if (Math.round(Math.abs(b.amount) * 100) !== aAmt) continue;
+      if (Math.abs(new Date(b.date + 'T00:00:00').getTime() - aTime) > 2 * DAY_MS) continue;
+      matchedIds.add(a.id);
+      matchedIds.add(b.id);
+      break;
+    }
+  }
+
+  if (matchedIds.size === 0) return txs;
+  return txs.map((t) => {
+    if (!matchedIds.has(t.id)) return t;
+    if (t.isTransfer) return t; // already flagged — respect existing excluded state
+    return { ...t, isTransfer: true, excluded: true };
   });
 }
 
@@ -101,6 +162,11 @@ interface BudgetContextValue {
   deleteMerchantRule: (description: string) => void;
   updateMerchantRule: (oldDesc: string, newDesc: string, category: string) => void;
 
+  // Split rules
+  splitRules: SplitRules;
+  createSplitRule: (rule: SplitRule) => void;
+  deleteSplitRule: (merchantKey: string) => void;
+
   // Goals
   addGoal: (g: Omit<Goal, 'id'>) => void;
   updateGoal: (id: string, updates: Partial<Goal>) => void;
@@ -143,6 +209,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   }));
   const [goals,        setGoals]        = useState<Goal[]>([]);
   const [merchantRules, setMerchantRules] = useState<MerchantRules>({});
+  const [splitRules,    setSplitRules]    = useState<SplitRules>({});
 
   // Hydrate from localStorage on mount (client only)
   useEffect(() => {
@@ -151,6 +218,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     setBudget(loadFlatBudget());
     setCarryOver(loadCarryOver());
     setMerchantRules(loadMerchantRules());
+    setSplitRules(loadSplitRules());
     const dm = loadDarkMode();
     setDark(dm);
     document.documentElement.classList.toggle('dark', dm);
@@ -221,6 +289,16 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     setMerchantRules(loadMerchantRules());
   }, []);
 
+  const createSplitRule = useCallback((rule: SplitRule) => {
+    addSplitRule(rule);
+    setSplitRules(loadSplitRules());
+  }, []);
+
+  const deleteSplitRuleFn = useCallback((merchantKey: string) => {
+    removeSplitRule(merchantKey);
+    setSplitRules(loadSplitRules());
+  }, []);
+
   const categoriesRef = useRef(categories);
   categoriesRef.current = categories;
 
@@ -278,9 +356,9 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
         if (aiCat) return { ...t, category: aiCat, categorizedBy: 'ai', needsReview: true };
         return t;
       });
-      setTxs((prev) => tagRecurring([...withAI, ...prev]));
+      setTxs((prev) => tagRecurring(detectTransferPairs([...withAI, ...prev])));
     } else {
-      setTxs((prev) => tagRecurring([...processed, ...prev]));
+      setTxs((prev) => tagRecurring(detectTransferPairs([...processed, ...prev])));
     }
     return { imported: unique.length, exactDups, fuzzyDups };
   }, []);
@@ -366,10 +444,11 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
 
   return (
     <BudgetContext.Provider value={{
-      txs, categories, budget, carryOver, dark, dateRange, goals, merchantRules,
+      txs, categories, budget, carryOver, dark, dateRange, goals, merchantRules, splitRules,
       filteredTxs,
       addTx, deleteTx, editTx, importTxs, excludeTx, batchEditTxs, splitTx, createMerchantRule,
       deleteMerchantRule: deleteMerchantRuleFn, updateMerchantRule: updateMerchantRuleFn,
+      createSplitRule, deleteSplitRule: deleteSplitRuleFn,
       addGoal, updateGoal, deleteGoal,
       updateBudget, toggleCarryOver,
       addCategory, deleteCategory, editCategory,

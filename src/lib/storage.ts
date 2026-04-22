@@ -1,5 +1,5 @@
 import { DEFAULT_CATEGORIES, DEFAULT_BUDGETS } from './constants';
-import type { Transaction, Category, Budget, CarryOver, MerchantRules } from './types';
+import type { Transaction, Category, Budget, CarryOver, MerchantRules, SplitRule, SplitRules } from './types';
 
 const KEY = {
   TRANSACTIONS: 'budget_transactions',
@@ -135,4 +135,21 @@ export function updateMerchantRule(oldDesc: string, newDesc: string, category: s
   delete rules[oldDesc.toLowerCase().trim()];
   rules[newDesc.toLowerCase().trim()] = category;
   saveMerchantRules(rules);
+}
+
+// ── Split rules ────────────────────────────────────────────────────────────────
+const SPLIT_RULES_KEY = 'budget_split_rules';
+export const loadSplitRules  = (): SplitRules  => safe<SplitRules>(SPLIT_RULES_KEY, {});
+export const saveSplitRules  = (v: SplitRules): void => localStorage.setItem(SPLIT_RULES_KEY, JSON.stringify(v));
+
+export function addSplitRule(rule: SplitRule): void {
+  const rules = loadSplitRules();
+  rules[rule.merchantKey] = rule;
+  saveSplitRules(rules);
+}
+
+export function removeSplitRule(merchantKey: string): void {
+  const rules = loadSplitRules();
+  delete rules[merchantKey];
+  saveSplitRules(rules);
 }

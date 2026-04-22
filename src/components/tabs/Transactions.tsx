@@ -5,7 +5,7 @@ import { useBudget } from '@/lib/BudgetContext';
 import { getCategoryColor, getCategoriesByType } from '@/lib/constants';
 import { importCSV } from '@/lib/csvImport';
 import { cleanDescription } from '@/lib/autoCategory';
-import type { Transaction, Category, MerchantRules, ChangeHistoryEntry } from '@/lib/types';
+import type { Transaction, Category, MerchantRules, ChangeHistoryEntry, SplitRule, SplitRules } from '@/lib/types';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function usd(n: number, d = 2) {
@@ -34,6 +34,11 @@ function loadUserTags(): string[] {
   try { return JSON.parse(localStorage.getItem('userTags') ?? 'null') || []; } catch { return []; }
 }
 
+function splitMerchantKey(description: string): string {
+  const clean = cleanDescription(description) || description;
+  return clean.toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+}
+
 // ── Auto-suggest rule helpers ──────────────────────────────────────────────────
 // Tracks how many times each (descLower|||catName) pair has been manually set.
 function loadCatCounts(): Record<string, number> {
@@ -48,6 +53,79 @@ function loadDismissed(): Set<string> {
 }
 function saveDismissed(s: Set<string>): void {
   localStorage.setItem('budget_rule_dismissed', JSON.stringify([...s]));
+}
+
+// ── Recurring popover ─────────────────────────────────────────────────────────
+function normalizeKey(d: string): string {
+  return (d || '').toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+}
+
+function RecurringPopover({
+  tx, allTxs, anchor, onClose,
+}: {
+  tx: Transaction;
+  allTxs: Transaction[];
+  anchor: DOMRect;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const key = normalizeKey(tx.description);
+  const occurrences = allTxs
+    .filter((t) => normalizeKey(t.description) === key)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const avg = occurrences.length
+    ? occurrences.reduce((s, t) => s + Math.abs(t.amount), 0) / occurrences.length
+    : 0;
+  const displayName = cleanDescription(tx.description) || tx.description;
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [onClose]);
+
+  const left = Math.max(8, anchor.left - 8);
+
+  return (
+    <div ref={ref} onMouseDown={(e) => e.stopPropagation()} style={{
+      position: 'fixed',
+      top: anchor.bottom + 6,
+      left,
+      zIndex: 9999,
+      background: 'var(--card)',
+      border: '1px solid var(--border)',
+      borderRadius: 10,
+      boxShadow: '0 8px 32px rgba(0,0,0,0.28)',
+      minWidth: 260,
+      maxWidth: 340,
+      overflow: 'hidden',
+      fontSize: 12,
+    }}>
+      <div style={{ padding: '10px 14px 8px', borderBottom: '1px solid var(--border-2)', background: 'rgba(91,87,245,0.06)' }}>
+        <p style={{ fontWeight: 700, color: 'var(--accent)', fontSize: 12, marginBottom: 2 }}>↻ {displayName}</p>
+        <p style={{ color: 'var(--text-2)', fontSize: 11 }}>
+          {occurrences.length} occurrence{occurrences.length !== 1 ? 's' : ''} · avg {usd(avg)}/mo
+        </p>
+      </div>
+      <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+        {occurrences.map((t) => (
+          <div key={t.id} style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '7px 14px', borderBottom: '1px solid var(--border-2)',
+            opacity: t.excluded ? 0.45 : 1,
+          }}>
+            <span style={{ color: 'var(--text-2)', fontSize: 11 }}>
+              {new Date(t.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              {t.excluded && <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--text-3)' }}>(excluded)</span>}
+            </span>
+            <span style={{ fontWeight: 600, color: 'var(--text-1)', fontSize: 12 }}>{usd(t.amount, 2)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
@@ -177,7 +255,13 @@ function TxForm({ initial, categories, onSave, onClose }: { initial?: Transactio
 }
 
 // ── Split modal ────────────────────────────────────────────────────────────────
-function SplitModal({ tx, categories, onSplit, onClose }: { tx: Transaction; categories: Category[]; onSplit: (id: string, splits: Array<{description: string; amount: number; category: string}>) => void; onClose: () => void }) {
+function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSplitRule }: {
+  tx: Transaction; categories: Category[];
+  onSplit: (id: string, splits: Array<{description: string; amount: number; category: string}>) => void;
+  onClose: () => void;
+  splitRules?: SplitRules;
+  onCreateSplitRule?: (rule: SplitRule) => void;
+}) {
   const expenseCats = getCategoriesByType(categories, 'expense');
   const incomeCats  = getCategoriesByType(categories, 'income');
   const isIncome    = catType(tx.category, categories) === 'income';
@@ -192,17 +276,71 @@ function SplitModal({ tx, categories, onSplit, onClose }: { tx: Transaction; cat
           { description: '',             amount: '',             category: tx.category },
         ]
   );
+  const [showSavePrompt, setShowSavePrompt] = useState(false);
+  const [pendingSplits, setPendingSplits] = useState<Array<{description: string; amount: number; category: string}> | null>(null);
+
   const updateSplit = (i: number, key: string, val: string) => setSplits((p) => p.map((s, j) => j === i ? { ...s, [key]: val } : s));
   const addRow      = () => setSplits((p) => [...p, { description: '', amount: '', category: tx.category }]);
   const removeRow   = (i: number) => setSplits((p) => p.filter((_, j) => j !== i));
   const splitSum = splits.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
   const diff     = Math.round((total - splitSum) * 100) / 100;
   const valid    = diff === 0 && splits.length >= 2 && splits.every((s) => parseFloat(s.amount) > 0);
-  const submit   = () => {
+
+  const submit = () => {
     if (!valid) return;
-    onSplit(tx.id, splits.map((s) => ({ description: s.description || tx.description, amount: isIncome ? -parseFloat(s.amount) : parseFloat(s.amount), category: s.category })));
-    onClose();
+    const splitData = splits.map((s) => ({
+      description: s.description || tx.description,
+      amount: isIncome ? -parseFloat(s.amount) : parseFloat(s.amount),
+      category: s.category,
+    }));
+    onSplit(tx.id, splitData);
+
+    const key = splitMerchantKey(tx.description);
+    if (onCreateSplitRule && !(splitRules?.[key])) {
+      setPendingSplits(splitData);
+      setShowSavePrompt(true);
+    } else {
+      onClose();
+    }
   };
+
+  const displayName = cleanDescription(tx.description) || tx.description;
+
+  if (showSavePrompt) {
+    return (
+      <Modal title="Save as split rule?" onClose={onClose} maxWidth={420}>
+        <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 14 }}>
+          Save this split as a rule for <strong style={{ color: 'var(--text-1)' }}>"{displayName}"</strong>?
+          It will be offered automatically for future transactions from this merchant.
+        </p>
+        <div style={{ background: 'var(--bg)', borderRadius: 8, border: '1px solid var(--border)', overflow: 'hidden', marginBottom: 16 }}>
+          {(pendingSplits ?? []).map((s, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: i < (pendingSplits?.length ?? 0) - 1 ? '1px solid var(--border-2)' : 'none', fontSize: 12 }}>
+              <span style={{ color: 'var(--text-2)' }}>{s.description} <span style={{ color: 'var(--text-3)' }}>· {s.category}</span></span>
+              <span style={{ fontWeight: 600, color: 'var(--text-1)' }}>{usd(Math.abs(s.amount), 2)} <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>({Math.round(Math.abs(s.amount) / total * 100)}%)</span></span>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} className="btn" style={{ fontSize: 13 }}>No thanks</button>
+          <button onClick={() => {
+            if (!onCreateSplitRule || !pendingSplits) { onClose(); return; }
+            onCreateSplitRule({
+              merchantKey: splitMerchantKey(tx.description),
+              displayName,
+              splits: pendingSplits.map((s) => ({
+                description: s.description || tx.description,
+                percentage: Math.round(Math.abs(s.amount) / total * 10000) / 100,
+                category: s.category,
+              })),
+            });
+            onClose();
+          }} className="btn btn-primary" style={{ fontSize: 13 }}>Save rule</button>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal title="Split transaction" onClose={onClose} maxWidth={480}>
       <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 16 }}>
@@ -324,7 +462,7 @@ function InlineCatPopover({ pos, tx, categories, onSelect, onClose }: { pos: DOM
 }
 
 // ── Detail slide-in panel ──────────────────────────────────────────────────────
-function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged }: {
+function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule }: {
   tx: Transaction; categories: Category[]; allTxs: Transaction[];
   onEdit: (id: string, u: Partial<Transaction>) => void;
   onDelete: (id: string) => void;
@@ -334,14 +472,17 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   userTags: string[];
   onUpdateUserTags: (tags: string[]) => void;
   onCategoryChanged?: (desc: string, cat: string) => void;
+  splitRules?: SplitRules;
+  onCreateSplitRule?: (rule: SplitRule) => void;
 }) {
-  const [visible,      setVisible]      = useState(false);
-  const [cat,          setCat]          = useState(tx.category);
-  const [displayName,  setDisplayName]  = useState(tx.displayName ?? '');
-  const [notes,        setNotes]        = useState(tx.notes ?? '');
-  const [tags,         setTags]         = useState(tx.tags ?? []);
-  const [tagInput,     setTagInput]     = useState('');
-  const [splitting,    setSplitting]    = useState(false);
+  const [visible,          setVisible]          = useState(false);
+  const [cat,              setCat]              = useState(tx.category);
+  const [displayName,      setDisplayName]      = useState(tx.displayName ?? '');
+  const [notes,            setNotes]            = useState(tx.notes ?? '');
+  const [tags,             setTags]             = useState(tx.tags ?? []);
+  const [tagInput,         setTagInput]         = useState('');
+  const [splitting,        setSplitting]        = useState(false);
+  const [applyRuleConfirm, setApplyRuleConfirm] = useState(false);
 
   useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
   useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); }, [tx.id]); // eslint-disable-line
@@ -362,6 +503,25 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
     if (!sameDesc || !sameAmt) return false;
     return Math.abs(new Date(e.date + 'T00:00:00').getTime() - new Date(tx.date + 'T00:00:00').getTime()) <= 2 * 24 * 60 * 60 * 1000;
   }) : null;
+
+  const applicableSplitRule = splitRules?.[splitMerchantKey(tx.description)];
+
+  const applyRule = () => {
+    if (!applicableSplitRule || !onSplit) return;
+    const total = Math.abs(tx.amount);
+    const isIncomeTx = catType(cat, categories) === 'income';
+    let remaining = total;
+    const scaledSplits = applicableSplitRule.splits.map((s, i, arr) => {
+      const amt = i === arr.length - 1
+        ? Math.round(remaining * 100) / 100
+        : Math.round(total * s.percentage / 100 * 100) / 100;
+      remaining = Math.round((remaining - amt) * 100) / 100;
+      return { description: s.description, amount: isIncomeTx ? -amt : amt, category: s.category };
+    });
+    onSplit(tx.id, scaledSplits);
+    setApplyRuleConfirm(false);
+    onClose();
+  };
 
   const addTag = (raw: string) => {
     const t = raw.trim().toLowerCase().replace(/\s+/g, '-');
@@ -547,11 +707,36 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
                 Split transaction
               </button>
             )}
+            {applicableSplitRule && onSplit && !tx.isSplit && !tx.splitParentId && !tx.excluded && (
+              <button onClick={() => setApplyRuleConfirm(true)}
+                style={{ fontSize: 12, color: 'var(--accent)', background: 'rgba(91,87,245,0.08)', border: '1px solid rgba(91,87,245,0.2)', borderRadius: 6, padding: '5px 12px', cursor: 'pointer' }}>
+                Apply split rule
+              </button>
+            )}
             <button onClick={() => { onExclude(tx.id, !tx.excluded); onClose(); }}
               style={{ fontSize: 12, color: tx.excluded ? 'var(--green)' : 'var(--amber)', background: tx.excluded ? 'rgba(52,211,153,0.08)' : 'rgba(245,162,0,0.08)', border: `1px solid ${tx.excluded ? 'rgba(52,211,153,0.25)' : 'rgba(245,162,0,0.25)'}`, borderRadius: 6, padding: '5px 12px', cursor: 'pointer' }}>
               {tx.excluded ? 'Include in totals' : 'Exclude from totals'}
             </button>
           </div>
+
+          {applyRuleConfirm && applicableSplitRule && (
+            <div style={{ padding: '12px 14px', borderRadius: 8, background: 'rgba(91,87,245,0.06)', border: '1px solid rgba(91,87,245,0.2)', fontSize: 12 }}>
+              <p style={{ fontWeight: 600, color: 'var(--text-1)', marginBottom: 8 }}>Apply split rule "{applicableSplitRule.displayName}"?</p>
+              {applicableSplitRule.splits.map((s, i) => {
+                const amt = Math.round(Math.abs(tx.amount) * s.percentage / 100 * 100) / 100;
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, color: 'var(--text-2)' }}>
+                    <span>{s.description} <span style={{ color: 'var(--text-3)' }}>· {s.category}</span></span>
+                    <span style={{ fontWeight: 500, color: 'var(--text-1)' }}>{usd(amt, 2)}</span>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                <button onClick={applyRule} className="btn btn-primary" style={{ fontSize: 12, flex: 1, justifyContent: 'center' }}>Apply</button>
+                <button onClick={() => setApplyRuleConfirm(false)} className="btn" style={{ fontSize: 12 }}>Cancel</button>
+              </div>
+            </div>
+          )}
 
           <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}>
             <div
@@ -560,6 +745,18 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
               <div style={{ position: 'absolute', top: 2, left: tx.taxDeductible ? 18 : 2, width: 16, height: 16, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
             </div>
             <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Tax Deductible</span>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}>
+            <div
+              onClick={() => {
+                const nowTransfer = !tx.isTransfer;
+                onEdit(tx.id, { isTransfer: nowTransfer, ...(nowTransfer && !tx.excluded ? { excluded: true } : {}) });
+              }}
+              style={{ position: 'relative', width: 36, height: 20, borderRadius: 99, background: tx.isTransfer ? '#3b82f6' : 'var(--border)', cursor: 'pointer', flexShrink: 0, transition: 'background 0.2s' }}>
+              <div style={{ position: 'absolute', top: 2, left: tx.isTransfer ? 18 : 2, width: 16, height: 16, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+            </div>
+            <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Transfer (auto-excluded)</span>
           </label>
 
           {(tx.changeHistory?.length ?? 0) > 0 && (
@@ -594,21 +791,31 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
       </div>
 
       {splitting && onSplit && (
-        <SplitModal tx={tx} categories={categories} onSplit={(id, splits) => { onSplit(id, splits); onClose(); }} onClose={() => setSplitting(false)} />
+        <SplitModal
+          tx={tx}
+          categories={categories}
+          onSplit={onSplit}
+          onClose={() => { setSplitting(false); onClose(); }}
+          splitRules={splitRules}
+          onCreateSplitRule={onCreateSplitRule}
+        />
       )}
     </>
   );
 }
 
 // ── Rules manager modal ────────────────────────────────────────────────────────
-function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, onClose }: {
+function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, onClose, splitRules, onDeleteSplitRule }: {
   merchantRules: MerchantRules;
   categories: Category[];
   onCreate: (desc: string, cat: string) => void;
   onDelete: (desc: string) => void;
   onUpdate: (oldDesc: string, newDesc: string, cat: string) => void;
   onClose: () => void;
+  splitRules?: SplitRules;
+  onDeleteSplitRule?: (key: string) => void;
 }) {
+  const [tab,     setTab]     = useState<'cat' | 'split'>('cat');
   const [newDesc, setNewDesc] = useState('');
   const [newCat,  setNewCat]  = useState(categories[0]?.name ?? '');
   const [editKey, setEditKey] = useState<string | null>(null);
@@ -633,78 +840,128 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
     setNewDesc('');
   };
 
+  const splitRuleEntries = Object.entries(splitRules ?? {});
+
   return (
-    <Modal title={`Merchant Rules${ruleCount > 0 ? ` · ${ruleCount}` : ''}`} onClose={onClose} maxWidth={500}>
-      {/* Add new rule */}
-      <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
-        <input type="text" placeholder="Merchant keyword (e.g. starbucks)" value={newDesc}
-          onChange={(e) => setNewDesc(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
-          style={{ flex: 1, height: 32, fontSize: 12, padding: '0 10px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
-        <select value={newCat} onChange={(e) => setNewCat(e.target.value)}
-          style={{ height: 32, fontSize: 12, borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 6px' }}>
-          {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-        </select>
-        <button onClick={handleAdd} disabled={!newDesc.trim()} className="btn btn-primary"
-          style={{ fontSize: 12, height: 32, padding: '0 12px', opacity: newDesc.trim() ? 1 : 0.4, cursor: newDesc.trim() ? 'pointer' : 'default' }}>
-          Add
-        </button>
+    <Modal title="Rules" onClose={onClose} maxWidth={500}>
+      {/* Tab switcher */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: 'var(--bg)', borderRadius: 8, padding: 3, border: '1px solid var(--border)' }}>
+        {([['cat', `Merchant Rules${ruleCount > 0 ? ` · ${ruleCount}` : ''}`], ['split', `Split Rules${splitRuleEntries.length > 0 ? ` · ${splitRuleEntries.length}` : ''}`]] as const).map(([t, label]) => (
+          <button key={t} onClick={() => setTab(t)}
+            style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, borderRadius: 6, border: 'none', cursor: 'pointer', background: tab === t ? 'var(--card)' : 'transparent', color: tab === t ? 'var(--text-1)' : 'var(--text-3)', transition: 'all 0.15s' }}>
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Search — only show when there are enough rules to warrant it */}
-      {ruleCount > 6 && (
-        <input type="text" placeholder="Search rules…" value={q} onChange={(e) => setQ(e.target.value)}
-          style={{ width: '100%', height: 28, fontSize: 12, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border-2)', color: 'var(--text-1)', marginBottom: 8, boxSizing: 'border-box' }} />
+      {tab === 'cat' && (
+        <>
+          {/* Add new rule */}
+          <div style={{ display: 'flex', gap: 7, marginBottom: 14 }}>
+            <input type="text" placeholder="Merchant keyword (e.g. starbucks)" value={newDesc}
+              onChange={(e) => setNewDesc(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+              style={{ flex: 1, height: 32, fontSize: 12, padding: '0 10px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+            <select value={newCat} onChange={(e) => setNewCat(e.target.value)}
+              style={{ height: 32, fontSize: 12, borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 6px' }}>
+              {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+            </select>
+            <button onClick={handleAdd} disabled={!newDesc.trim()} className="btn btn-primary"
+              style={{ fontSize: 12, height: 32, padding: '0 12px', opacity: newDesc.trim() ? 1 : 0.4, cursor: newDesc.trim() ? 'pointer' : 'default' }}>
+              Add
+            </button>
+          </div>
+
+          {/* Search */}
+          {ruleCount > 6 && (
+            <input type="text" placeholder="Search rules…" value={q} onChange={(e) => setQ(e.target.value)}
+              style={{ width: '100%', height: 28, fontSize: 12, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border-2)', color: 'var(--text-1)', marginBottom: 8, boxSizing: 'border-box' }} />
+          )}
+
+          {/* Rule list */}
+          {entries.length === 0 ? (
+            <p style={{ fontSize: 12, color: 'var(--text-3)', textAlign: 'center', padding: '28px 0' }}>
+              {ruleCount === 0 ? 'No rules yet. Add one above.' : 'No rules match.'}
+            </p>
+          ) : (
+            <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {entries.map(([key, cat]) =>
+                editKey === key ? (
+                  <div key={key} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 8px', borderRadius: 7, background: 'var(--card-alt)', border: '1px solid rgba(91,87,245,0.2)' }}>
+                    <input autoFocus value={editDesc} onChange={(e) => setEditDesc(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditKey(null); }}
+                      style={{ flex: 1, height: 28, fontSize: 12, padding: '0 8px', borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+                    <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
+                    <select value={editCat} onChange={(e) => setEditCat(e.target.value)}
+                      style={{ height: 28, fontSize: 11, borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 4px' }}>
+                      {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+                    </select>
+                    <button onClick={commitEdit} className="btn btn-primary" style={{ fontSize: 11, height: 28, padding: '0 10px' }}>Save</button>
+                    <button onClick={() => setEditKey(null)} className="btn" style={{ fontSize: 11, height: 28, padding: '0 8px' }}>×</button>
+                  </div>
+                ) : (
+                  <div key={key}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 7, transition: 'background 0.1s' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+                    <span style={{ flex: 1, fontSize: 12, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: '50%', background: getCategoryColor(cat, categories) }} />
+                      <span style={{ fontSize: 12, color: 'var(--text-2)', whiteSpace: 'nowrap' }}>{cat}</span>
+                    </div>
+                    <button onClick={() => startEdit(key, cat)} title="Edit"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-1)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                      <Icon d={IC.edit} size={11} />
+                    </button>
+                    <button onClick={() => onDelete(key)} title="Delete"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                      <Icon d={IC.trash} size={11} />
+                    </button>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+        </>
       )}
 
-      {/* Rule list */}
-      {entries.length === 0 ? (
-        <p style={{ fontSize: 12, color: 'var(--text-3)', textAlign: 'center', padding: '28px 0' }}>
-          {ruleCount === 0 ? 'No rules yet. Add one above.' : 'No rules match.'}
-        </p>
-      ) : (
-        <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
-          {entries.map(([key, cat]) =>
-            editKey === key ? (
-              <div key={key} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 8px', borderRadius: 7, background: 'var(--card-alt)', border: '1px solid rgba(91,87,245,0.2)' }}>
-                <input autoFocus value={editDesc} onChange={(e) => setEditDesc(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditKey(null); }}
-                  style={{ flex: 1, height: 28, fontSize: 12, padding: '0 8px', borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
-                <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
-                <select value={editCat} onChange={(e) => setEditCat(e.target.value)}
-                  style={{ height: 28, fontSize: 11, borderRadius: 5, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 4px' }}>
-                  {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-                </select>
-                <button onClick={commitEdit} className="btn btn-primary" style={{ fontSize: 11, height: 28, padding: '0 10px' }}>Save</button>
-                <button onClick={() => setEditKey(null)} className="btn" style={{ fontSize: 11, height: 28, padding: '0 8px' }}>×</button>
-              </div>
-            ) : (
-              <div key={key}
-                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 7, transition: 'background 0.1s' }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
-                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
-                <span style={{ flex: 1, fontSize: 12, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
-                <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>→</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: getCategoryColor(cat, categories) }} />
-                  <span style={{ fontSize: 12, color: 'var(--text-2)', whiteSpace: 'nowrap' }}>{cat}</span>
+      {tab === 'split' && (
+        <>
+          {splitRuleEntries.length === 0 ? (
+            <p style={{ fontSize: 12, color: 'var(--text-3)', textAlign: 'center', padding: '28px 0' }}>
+              No split rules yet. Split a transaction and choose "Save rule" to create one.
+            </p>
+          ) : (
+            <div style={{ maxHeight: 400, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {splitRuleEntries.map(([key, rule]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 10px', borderRadius: 8, border: '1px solid var(--border-2)', background: 'var(--bg)' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rule.displayName}</p>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {rule.splits.map((s, i) => (
+                        <span key={i} style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--card-alt)', borderRadius: 4, padding: '2px 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ width: 5, height: 5, borderRadius: '50%', background: getCategoryColor(s.category, categories), flexShrink: 0, display: 'inline-block' }} />
+                          {s.description} · {s.category} · {s.percentage}%
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <button onClick={() => onDeleteSplitRule?.(key)} title="Delete split rule"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0, marginTop: 1 }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                    <Icon d={IC.trash} size={11} />
+                  </button>
                 </div>
-                <button onClick={() => startEdit(key, cat)} title="Edit"
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-1)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
-                  <Icon d={IC.edit} size={11} />
-                </button>
-                <button onClick={() => onDelete(key)} title="Delete"
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
-                  <Icon d={IC.trash} size={11} />
-                </button>
-              </div>
-            )
+              ))}
+            </div>
           )}
-        </div>
+        </>
       )}
     </Modal>
   );
@@ -712,7 +969,7 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule } = useBudget();
 
   const [showAdd,         setShowAdd]         = useState(false);
   const [selectedId,      setSelectedId]      = useState<string | null>(null);
@@ -744,6 +1001,7 @@ export default function Transactions() {
   const [savePresetOpen,     setSavePresetOpen]     = useState(false);
   const [presetName,         setPresetName]         = useState('');
   const [showRunningBalance, setShowRunningBalance] = useState(false);
+  const [recurringPopover,   setRecurringPopover]   = useState<{ tx: Transaction; anchor: DOMRect } | null>(null);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
   useEffect(() => { setPresets(loadPresets()); }, []);
@@ -1262,8 +1520,22 @@ export default function Transactions() {
                           {tx.isDuplicate && (
                             <span title="Possible duplicate" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(245,162,0,0.12)', color: 'var(--amber)', border: '1px solid rgba(245,162,0,0.25)', flexShrink: 0 }}>~dup</span>
                           )}
+                          {tx.isTransfer && (
+                            <span title="Transfer — excluded from totals" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(59,130,246,0.1)', color: '#3b82f6', border: '1px solid rgba(59,130,246,0.25)', flexShrink: 0 }}>⇄ Transfer</span>
+                          )}
                           {tx.isRecurring && !isExcluded && (
-                            <span title={`Recurring · ${tx.recurringFrequency}`} style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(91,87,245,0.09)', color: 'var(--accent)', border: '1px solid rgba(91,87,245,0.2)', flexShrink: 0 }}>↻ {tx.recurringFrequency}</span>
+                            <button
+                              title={`Recurring · ${tx.recurringFrequency} — click to see all occurrences`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                setRecurringPopover((prev) =>
+                                  prev?.tx.id === tx.id ? null : { tx, anchor: rect }
+                                );
+                              }}
+                              style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(91,87,245,0.09)', color: 'var(--accent)', border: '1px solid rgba(91,87,245,0.2)', flexShrink: 0, cursor: 'pointer' }}>
+                              ↻ {tx.recurringFrequency}
+                            </button>
                           )}
                           {tx.taxDeductible && !isExcluded && (
                             <span title="Tax deductible" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(52,211,153,0.1)', color: 'var(--green)', border: '1px solid rgba(52,211,153,0.25)', flexShrink: 0 }}>Tax</span>
@@ -1349,7 +1621,17 @@ export default function Transactions() {
         <DetailPanel tx={selectedTx} categories={categories} allTxs={allTxs}
           onEdit={editTx} onDelete={deleteTx} onExclude={excludeTx} onSplit={splitTx}
           onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags}
-          onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }} />
+          onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }}
+          splitRules={splitRules} onCreateSplitRule={createSplitRule} />
+      )}
+
+      {recurringPopover && (
+        <RecurringPopover
+          tx={recurringPopover.tx}
+          allTxs={allTxs}
+          anchor={recurringPopover.anchor}
+          onClose={() => setRecurringPopover(null)}
+        />
       )}
 
       {/* Bulk action toolbar */}
@@ -1416,7 +1698,8 @@ export default function Transactions() {
       {showRules && (
         <RulesModal merchantRules={merchantRules} categories={categories}
           onCreate={createMerchantRule} onDelete={deleteMerchantRule} onUpdate={updateMerchantRule}
-          onClose={() => setShowRules(false)} />
+          onClose={() => setShowRules(false)}
+          splitRules={splitRules} onDeleteSplitRule={deleteSplitRule} />
       )}
 
       {/* Merchant rule prompt toast */}
