@@ -46,6 +46,7 @@ export interface Transaction {
   groupId?: string;
   groupName?: string;
   ownership?: 'mine' | 'theirs' | 'ours';
+  isAmortized?: boolean;
 }
 
 export interface SplitChild {
@@ -97,6 +98,14 @@ export interface SplitRule {
 }
 
 export type SplitRules = Record<string, SplitRule>;
+
+// ── Split templates ────────────────────────────────────────────────────────────
+
+export interface SplitTemplate {
+  id: string;
+  name: string;
+  splits: SplitRuleEntry[];
+}
 
 // ── Import helpers ─────────────────────────────────────────────────────────────
 

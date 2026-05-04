@@ -1,5 +1,5 @@
 import { DEFAULT_CATEGORIES, DEFAULT_BUDGETS } from './constants';
-import type { Transaction, Category, Budget, CarryOver, MerchantRules, SplitRule, SplitRules } from './types';
+import type { Transaction, Category, Budget, CarryOver, MerchantRules, SplitRule, SplitRules, SplitTemplate } from './types';
 
 const KEY = {
   TRANSACTIONS: 'budget_transactions',
@@ -152,4 +152,23 @@ export function removeSplitRule(merchantKey: string): void {
   const rules = loadSplitRules();
   delete rules[merchantKey];
   saveSplitRules(rules);
+}
+
+// ── Split templates ────────────────────────────────────────────────────────────
+const SPLIT_TEMPLATES_KEY = 'budget_split_templates';
+export const loadSplitTemplates = (): SplitTemplate[] => safe<SplitTemplate[]>(SPLIT_TEMPLATES_KEY, []);
+export const saveSplitTemplates = (v: SplitTemplate[]): void => localStorage.setItem(SPLIT_TEMPLATES_KEY, JSON.stringify(v));
+
+export function addSplitTemplate(t: SplitTemplate): void {
+  const templates = loadSplitTemplates();
+  templates.push(t);
+  saveSplitTemplates(templates);
+}
+
+export function removeSplitTemplate(id: string): void {
+  saveSplitTemplates(loadSplitTemplates().filter((t) => t.id !== id));
+}
+
+export function updateSplitTemplate(id: string, updates: Partial<SplitTemplate>): void {
+  saveSplitTemplates(loadSplitTemplates().map((t) => (t.id === id ? { ...t, ...updates } : t)));
 }

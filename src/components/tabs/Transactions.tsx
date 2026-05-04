@@ -5,7 +5,7 @@ import { useBudget } from '@/lib/BudgetContext';
 import { getCategoryColor, getCategoriesByType } from '@/lib/constants';
 import { importCSV } from '@/lib/csvImport';
 import { cleanDescription } from '@/lib/autoCategory';
-import type { Transaction, Category, MerchantRules, ChangeHistoryEntry, SplitRule, SplitRules } from '@/lib/types';
+import type { Transaction, Category, MerchantRules, ChangeHistoryEntry, SplitRule, SplitRules, SplitTemplate, SplitRuleEntry } from '@/lib/types';
 import { useKeyboardShortcuts } from '@/lib/useKeyboardShortcuts';
 import TransactionChat from '@/components/TransactionChat';
 
@@ -299,12 +299,13 @@ function TxForm({ initial, categories, onSave, onClose }: { initial?: Transactio
 }
 
 // ── Split modal ────────────────────────────────────────────────────────────────
-function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSplitRule }: {
+function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSplitRule, onAmortize }: {
   tx: Transaction; categories: Category[];
   onSplit: (id: string, splits: Array<{description: string; amount: number; category: string}>) => void;
   onClose: () => void;
   splitRules?: SplitRules;
   onCreateSplitRule?: (rule: SplitRule) => void;
+  onAmortize?: (parentId: string, months: number, startYearMonth: string, category: string, descOverride?: string) => void;
 }) {
   const { privacyMode } = useBudget();
   const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -313,6 +314,11 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   const isIncome    = catType(tx.category, categories) === 'income';
   const visibleCats = isIncome ? incomeCats : expenseCats;
   const total       = Math.abs(tx.amount);
+  const displayName = cleanDescription(tx.description) || tx.description;
+
+  const [mode, setMode] = useState<'custom' | 'amortize'>('custom');
+
+  // ── Custom split state ──
   type SplitRow = { description: string; amount: string; category: string };
   const [splits, setSplits] = useState<SplitRow[]>(
     tx.splitChildren?.length
@@ -332,7 +338,7 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   const diff     = Math.round((total - splitSum) * 100) / 100;
   const valid    = diff === 0 && splits.length >= 2 && splits.every((s) => parseFloat(s.amount) > 0);
 
-  const submit = () => {
+  const submitCustom = () => {
     if (!valid) return;
     const splitData = splits.map((s) => ({
       description: s.description || tx.description,
@@ -340,7 +346,6 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
       category: s.category,
     }));
     onSplit(tx.id, splitData);
-
     const key = splitMerchantKey(tx.description);
     if (onCreateSplitRule && !(splitRules?.[key])) {
       setPendingSplits(splitData);
@@ -350,7 +355,32 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
     }
   };
 
-  const displayName = cleanDescription(tx.description) || tx.description;
+  // ── Amortize state ──
+  const txDate = tx.date.slice(0, 7); // YYYY-MM
+  const [amortMonths,    setAmortMonths]    = useState(3);
+  const [amortStart,     setAmortStart]     = useState(txDate);
+  const [amortCategory,  setAmortCategory]  = useState(tx.category);
+  const [amortDesc,      setAmortDesc]      = useState('');
+
+  const perMonth = Math.round(total / amortMonths * 100) / 100;
+  const amortPreview = Array.from({ length: Math.min(amortMonths, 24) }, (_, i) => {
+    const [yr, mo] = amortStart.split('-').map(Number);
+    const d = new Date(yr, mo - 1 + i, 1);
+    const amt = i === amortMonths - 1
+      ? Math.round((total - perMonth * (amortMonths - 1)) * 100) / 100
+      : perMonth;
+    return {
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+      amt,
+    };
+  });
+
+  const submitAmortize = () => {
+    if (!onAmortize) return;
+    onAmortize(tx.id, amortMonths, amortStart, amortCategory, amortDesc.trim() || undefined);
+    onClose();
+  };
 
   if (showSavePrompt) {
     return (
@@ -388,32 +418,96 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   }
 
   return (
-    <Modal title="Split transaction" onClose={onClose} maxWidth={480}>
-      <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 16 }}>
-        Total: <strong style={{ color: 'var(--text-1)' }}>{privacyMode ? '••••' : `$${total.toFixed(2)}`}</strong>
-        {diff !== 0 && <span style={{ color: 'var(--red)', marginLeft: 8 }}>remaining: {privacyMode ? '••••' : `$${Math.abs(diff).toFixed(2)}`}</span>}
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
-        {splits.map((s, i) => (
-          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 120px 28px', gap: 6, alignItems: 'center' }}>
-            <input type="text" placeholder="Description" value={s.description} onChange={(e) => updateSplit(i, 'description', e.target.value)} style={{ fontSize: 12 }} />
-            <input type="number" placeholder="0.00" min="0.01" step="0.01" value={s.amount} onChange={(e) => updateSplit(i, 'amount', e.target.value)} style={{ fontSize: 12, textAlign: 'right' }} />
-            <select value={s.category} onChange={(e) => updateSplit(i, 'category', e.target.value)} style={{ fontSize: 12 }}>
-              {visibleCats.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-            </select>
-            <button onClick={() => removeRow(i)} disabled={splits.length <= 2}
-              style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 5, background: 'none', cursor: splits.length <= 2 ? 'default' : 'pointer', color: 'var(--text-3)', opacity: splits.length <= 2 ? 0.3 : 1 }}>
-              <Icon d={IC.close} />
+    <Modal title="Split transaction" onClose={onClose} maxWidth={500}>
+      {/* Mode tabs */}
+      {onAmortize && (
+        <div style={{ display: 'flex', gap: 3, marginBottom: 16, background: 'var(--bg)', borderRadius: 8, padding: 3, border: '1px solid var(--border)' }}>
+          {([['custom', 'Custom split'], ['amortize', 'Spread across months']] as const).map(([m, label]) => (
+            <button key={m} onClick={() => setMode(m)}
+              style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, borderRadius: 6, border: 'none', cursor: 'pointer', background: mode === m ? 'var(--card)' : 'transparent', color: mode === m ? 'var(--text-1)' : 'var(--text-3)', transition: 'all 0.15s' }}>
+              {label}
             </button>
+          ))}
+        </div>
+      )}
+
+      {mode === 'custom' && (
+        <>
+          <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 16 }}>
+            Total: <strong style={{ color: 'var(--text-1)' }}>{privacyMode ? '••••' : `$${total.toFixed(2)}`}</strong>
+            {diff !== 0 && <span style={{ color: 'var(--red)', marginLeft: 8 }}>remaining: {privacyMode ? '••••' : `$${Math.abs(diff).toFixed(2)}`}</span>}
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
+            {splits.map((s, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 120px 28px', gap: 6, alignItems: 'center' }}>
+                <input type="text" placeholder="Description" value={s.description} onChange={(e) => updateSplit(i, 'description', e.target.value)} style={{ fontSize: 12 }} />
+                <input type="number" placeholder="0.00" min="0.01" step="0.01" value={s.amount} onChange={(e) => updateSplit(i, 'amount', e.target.value)} style={{ fontSize: 12, textAlign: 'right' }} />
+                <select value={s.category} onChange={(e) => updateSplit(i, 'category', e.target.value)} style={{ fontSize: 12 }}>
+                  {visibleCats.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+                </select>
+                <button onClick={() => removeRow(i)} disabled={splits.length <= 2}
+                  style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 5, background: 'none', cursor: splits.length <= 2 ? 'default' : 'pointer', color: 'var(--text-3)', opacity: splits.length <= 2 ? 0.3 : 1 }}>
+                  <Icon d={IC.close} />
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={addRow} className="btn" style={{ fontSize: 12, padding: '6px 12px' }}>+ Row</button>
-        <div style={{ flex: 1 }} />
-        <button onClick={onClose} className="btn" style={{ fontSize: 12 }}>Cancel</button>
-        <button onClick={submit} disabled={!valid} className="btn btn-primary" style={{ fontSize: 12, opacity: valid ? 1 : 0.4, cursor: valid ? 'pointer' : 'default' }}>Split</button>
-      </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={addRow} className="btn" style={{ fontSize: 12, padding: '6px 12px' }}>+ Row</button>
+            <div style={{ flex: 1 }} />
+            <button onClick={onClose} className="btn" style={{ fontSize: 12 }}>Cancel</button>
+            <button onClick={submitCustom} disabled={!valid} className="btn btn-primary" style={{ fontSize: 12, opacity: valid ? 1 : 0.4, cursor: valid ? 'pointer' : 'default' }}>Split</button>
+          </div>
+        </>
+      )}
+
+      {mode === 'amortize' && (
+        <>
+          <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 14 }}>
+            Spread <strong style={{ color: 'var(--text-1)' }}>{privacyMode ? '••••' : `$${total.toFixed(2)}`}</strong> as equal monthly portions. The original transaction will be excluded from budget totals.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+            <div>
+              <label className="label" style={{ display: 'block', marginBottom: 4 }}>Months</label>
+              <input type="number" min={2} max={60} value={amortMonths}
+                onChange={(e) => setAmortMonths(Math.max(2, Math.min(60, parseInt(e.target.value) || 2)))}
+                style={{ width: '100%', height: 32, fontSize: 13, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label className="label" style={{ display: 'block', marginBottom: 4 }}>Start month</label>
+              <input type="month" value={amortStart} onChange={(e) => setAmortStart(e.target.value)}
+                style={{ width: '100%', height: 32, fontSize: 13, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label className="label" style={{ display: 'block', marginBottom: 4 }}>Category</label>
+              <select value={amortCategory} onChange={(e) => setAmortCategory(e.target.value)}
+                style={{ width: '100%', height: 32, fontSize: 12, borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 6px', boxSizing: 'border-box' }}>
+                {visibleCats.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="label" style={{ display: 'block', marginBottom: 4 }}>Description (optional)</label>
+              <input type="text" placeholder={displayName} value={amortDesc} onChange={(e) => setAmortDesc(e.target.value)}
+                style={{ width: '100%', height: 32, fontSize: 12, padding: '0 8px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-1)', boxSizing: 'border-box' }} />
+            </div>
+          </div>
+          <div style={{ background: 'var(--bg)', borderRadius: 8, border: '1px solid var(--border)', overflow: 'hidden', marginBottom: 14, maxHeight: 200, overflowY: 'auto' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', padding: '6px 12px', borderBottom: '1px solid var(--border-2)', fontSize: 10, fontWeight: 600, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              <span>Month</span><span style={{ textAlign: 'right' }}>Amount</span>
+            </div>
+            {amortPreview.map((row, i) => (
+              <div key={row.date} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', padding: '6px 12px', borderBottom: i < amortPreview.length - 1 ? '1px solid var(--border-2)' : 'none', fontSize: 12 }}>
+                <span style={{ color: 'var(--text-2)' }}>{row.label}</span>
+                <span style={{ textAlign: 'right', fontWeight: 500, color: 'var(--text-1)' }}>{privacyMode ? '••••' : `$${row.amt.toFixed(2)}`}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={onClose} className="btn" style={{ fontSize: 12 }}>Cancel</button>
+            <button onClick={submitAmortize} className="btn btn-primary" style={{ fontSize: 12 }}>Spread</button>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }
@@ -831,7 +925,7 @@ function MerchantPanel({ merchantName, allTxs, onClose, privacyMode }: {
 }
 
 // ── Detail slide-in panel ──────────────────────────────────────────────────────
-function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule, onAttachmentsChanged }: {
+function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule, onAttachmentsChanged, onAmortize }: {
   tx: Transaction; categories: Category[]; allTxs: Transaction[];
   onEdit: (id: string, u: Partial<Transaction>) => void;
   onDelete: (id: string) => void;
@@ -844,6 +938,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   splitRules?: SplitRules;
   onCreateSplitRule?: (rule: SplitRule) => void;
   onAttachmentsChanged?: () => void;
+  onAmortize?: (parentId: string, months: number, startYearMonth: string, category: string, descOverride?: string) => void;
 }) {
   const { privacyMode } = useBudget();
   const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -1272,6 +1367,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
           onClose={() => { setSplitting(false); onClose(); }}
           splitRules={splitRules}
           onCreateSplitRule={onCreateSplitRule}
+          onAmortize={onAmortize}
         />
       )}
     </>
@@ -1279,7 +1375,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
 }
 
 // ── Rules manager modal ────────────────────────────────────────────────────────
-function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, onClose, splitRules, onDeleteSplitRule }: {
+function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, onClose, splitRules, onDeleteSplitRule, splitTemplates, onCreateTemplate, onDeleteTemplate, onRenameTemplate }: {
   merchantRules: MerchantRules;
   categories: Category[];
   onCreate: (desc: string, cat: string) => void;
@@ -1288,14 +1384,27 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
   onClose: () => void;
   splitRules?: SplitRules;
   onDeleteSplitRule?: (key: string) => void;
+  splitTemplates?: SplitTemplate[];
+  onCreateTemplate?: (t: SplitTemplate) => void;
+  onDeleteTemplate?: (id: string) => void;
+  onRenameTemplate?: (id: string, name: string) => void;
 }) {
-  const [tab,     setTab]     = useState<'cat' | 'split'>('cat');
+  const [tab,     setTab]     = useState<'cat' | 'split' | 'templates'>('cat');
   const [newDesc, setNewDesc] = useState('');
   const [newCat,  setNewCat]  = useState(categories[0]?.name ?? '');
   const [editKey, setEditKey] = useState<string | null>(null);
   const [editDesc, setEditDesc] = useState('');
   const [editCat,  setEditCat]  = useState('');
   const [q, setQ] = useState('');
+
+  // Template creation state
+  const [tmplName,   setTmplName]   = useState('');
+  const [tmplSplits, setTmplSplits] = useState<Array<{description: string; percentage: number; category: string}>>([
+    { description: '', percentage: 50, category: categories[0]?.name ?? '' },
+    { description: '', percentage: 50, category: categories[0]?.name ?? '' },
+  ]);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameVal,  setRenameVal]  = useState('');
 
   const ruleCount = Object.keys(merchantRules).length;
   const entries = Object.entries(merchantRules)
@@ -1316,11 +1425,32 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
 
   const splitRuleEntries = Object.entries(splitRules ?? {});
 
+  const tmplPctTotal = tmplSplits.reduce((s, r) => s + r.percentage, 0);
+  const tmplValid = tmplName.trim().length > 0 && tmplSplits.length >= 2 && tmplSplits.every((r) => r.description.trim()) && Math.abs(tmplPctTotal - 100) < 0.01;
+
+  const handleCreateTemplate = () => {
+    if (!tmplValid || !onCreateTemplate) return;
+    onCreateTemplate({
+      id: crypto.randomUUID(),
+      name: tmplName.trim(),
+      splits: tmplSplits.map((r) => ({ description: r.description.trim(), percentage: r.percentage, category: r.category })),
+    });
+    setTmplName('');
+    setTmplSplits([
+      { description: '', percentage: 50, category: categories[0]?.name ?? '' },
+      { description: '', percentage: 50, category: categories[0]?.name ?? '' },
+    ]);
+  };
+
   return (
     <Modal title="Rules" onClose={onClose} maxWidth={500}>
       {/* Tab switcher */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: 'var(--bg)', borderRadius: 8, padding: 3, border: '1px solid var(--border)' }}>
-        {([['cat', `Merchant Rules${ruleCount > 0 ? ` · ${ruleCount}` : ''}`], ['split', `Split Rules${splitRuleEntries.length > 0 ? ` · ${splitRuleEntries.length}` : ''}`]] as const).map(([t, label]) => (
+        {([
+          ['cat', `Merchant Rules${ruleCount > 0 ? ` · ${ruleCount}` : ''}`],
+          ['split', `Split Rules${splitRuleEntries.length > 0 ? ` · ${splitRuleEntries.length}` : ''}`],
+          ['templates', `Templates${(splitTemplates?.length ?? 0) > 0 ? ` · ${splitTemplates!.length}` : ''}`],
+        ] as const).map(([t, label]) => (
           <button key={t} onClick={() => setTab(t)}
             style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, borderRadius: 6, border: 'none', cursor: 'pointer', background: tab === t ? 'var(--card)' : 'transparent', color: tab === t ? 'var(--text-1)' : 'var(--text-3)', transition: 'all 0.15s' }}>
             {label}
@@ -1437,13 +1567,105 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
           )}
         </>
       )}
+
+      {tab === 'templates' && (
+        <>
+          {/* Create new template */}
+          <div style={{ border: '1px solid var(--border-2)', borderRadius: 8, padding: 12, marginBottom: 14, background: 'var(--bg)' }}>
+            <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-2)', marginBottom: 8 }}>New Template</p>
+            <input type="text" placeholder="Template name (e.g. Costco Split)" value={tmplName}
+              onChange={(e) => setTmplName(e.target.value)}
+              style={{ width: '100%', height: 32, fontSize: 12, padding: '0 10px', borderRadius: 6, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-1)', marginBottom: 8, boxSizing: 'border-box' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 8 }}>
+              {tmplSplits.map((row, i) => (
+                <div key={i} style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                  <input type="text" placeholder="Description" value={row.description}
+                    onChange={(e) => { const s = [...tmplSplits]; s[i] = { ...s[i], description: e.target.value }; setTmplSplits(s); }}
+                    style={{ flex: 2, height: 29, fontSize: 12, padding: '0 8px', borderRadius: 5, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+                  <input type="number" min={0} max={100} step={1} value={row.percentage}
+                    onChange={(e) => { const s = [...tmplSplits]; s[i] = { ...s[i], percentage: parseFloat(e.target.value) || 0 }; setTmplSplits(s); }}
+                    style={{ width: 56, height: 29, fontSize: 12, padding: '0 6px', borderRadius: 5, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-1)', textAlign: 'right' }} />
+                  <span style={{ fontSize: 11, color: 'var(--text-3)' }}>%</span>
+                  <select value={row.category} onChange={(e) => { const s = [...tmplSplits]; s[i] = { ...s[i], category: e.target.value }; setTmplSplits(s); }}
+                    style={{ flex: 2, height: 29, fontSize: 11, borderRadius: 5, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-1)', padding: '0 4px' }}>
+                    {categories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+                  </select>
+                  {tmplSplits.length > 2 && (
+                    <button onClick={() => setTmplSplits(tmplSplits.filter((_, j) => j !== i))}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px' }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                      <Icon d={IC.trash} size={11} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button onClick={() => setTmplSplits([...tmplSplits, { description: '', percentage: 0, category: categories[0]?.name ?? '' }])}
+                className="btn" style={{ fontSize: 11, height: 28, padding: '0 10px' }}>+ Row</button>
+              <span style={{ fontSize: 11, color: Math.abs(tmplPctTotal - 100) < 0.01 ? 'var(--green)' : 'var(--red)', marginLeft: 'auto' }}>
+                Total: {tmplPctTotal}%
+              </span>
+              <button onClick={handleCreateTemplate} disabled={!tmplValid} className="btn btn-primary"
+                style={{ fontSize: 12, height: 28, padding: '0 12px', opacity: tmplValid ? 1 : 0.4, cursor: tmplValid ? 'pointer' : 'default' }}>
+                Save template
+              </button>
+            </div>
+          </div>
+
+          {/* Template list */}
+          {!splitTemplates || splitTemplates.length === 0 ? (
+            <p style={{ fontSize: 12, color: 'var(--text-3)', textAlign: 'center', padding: '16px 0' }}>
+              No templates yet. Create one above.
+            </p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 300, overflowY: 'auto' }}>
+              {splitTemplates.map((t) => (
+                <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 10px', borderRadius: 8, border: '1px solid var(--border-2)', background: 'var(--bg)' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {renamingId === t.id ? (
+                      <input autoFocus value={renameVal} onChange={(e) => setRenameVal(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { onRenameTemplate?.(t.id, renameVal.trim() || t.name); setRenamingId(null); } if (e.key === 'Escape') setRenamingId(null); }}
+                        onBlur={() => { onRenameTemplate?.(t.id, renameVal.trim() || t.name); setRenamingId(null); }}
+                        style={{ fontSize: 13, fontWeight: 600, width: '100%', height: 24, padding: '0 6px', borderRadius: 5, background: 'var(--card)', border: '1px solid var(--accent)', color: 'var(--text-1)', marginBottom: 4 }} />
+                    ) : (
+                      <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</p>
+                    )}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {t.splits.map((s, i) => (
+                        <span key={i} style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--card-alt)', borderRadius: 4, padding: '2px 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ width: 5, height: 5, borderRadius: '50%', background: getCategoryColor(s.category, categories), flexShrink: 0, display: 'inline-block' }} />
+                          {s.description} · {s.category} · {s.percentage}%
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <button onClick={() => { setRenamingId(t.id); setRenameVal(t.name); }} title="Rename"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-1)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                    <Icon d={IC.edit} size={11} />
+                  </button>
+                  <button onClick={() => onDeleteTemplate?.(t.id)} title="Delete template"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}>
+                    <Icon d={IC.trash} size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </Modal>
   );
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule, privacyMode, dateRange } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule, privacyMode, dateRange, amortizeTx, bulkSplitTx, splitTemplates, createSplitTemplate, deleteSplitTemplate, renameSplitTemplate } = useBudget();
   const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 
   const [showAdd,         setShowAdd]         = useState(false);
@@ -1479,8 +1701,10 @@ export default function Transactions() {
   const [groupFilters,    setGroupFilters]    = useState(new Set<string>());
   const [groupFilterOpen, setGroupFilterOpen] = useState(false);
   const [groupFilterRect, setGroupFilterRect] = useState<DOMRect | null>(null);
-  const [bulkGroupOpen,   setBulkGroupOpen]   = useState(false);
-  const [bulkGroupValue,  setBulkGroupValue]  = useState('');
+  const [bulkGroupOpen,       setBulkGroupOpen]       = useState(false);
+  const [bulkGroupValue,      setBulkGroupValue]      = useState('');
+  const [bulkTemplateOpen,    setBulkTemplateOpen]    = useState(false);
+  const [bulkTemplateId,      setBulkTemplateId]      = useState<string>('');
   const [merchantPrompt,  setMerchantPrompt]  = useState<{ descs: string[]; cat: string } | null>(null);
   const [showRules,       setShowRules]       = useState(false);
   const [ruleSuggestion,  setRuleSuggestion]  = useState<{ desc: string; cat: string } | null>(null);
@@ -2336,7 +2560,8 @@ export default function Transactions() {
           onClose={() => setSelectedId(null)} userTags={userTags} onUpdateUserTags={handleUpdateUserTags}
           onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }}
           splitRules={splitRules} onCreateSplitRule={createSplitRule}
-          onAttachmentsChanged={refreshAttachmentSet} />
+          onAttachmentsChanged={refreshAttachmentSet}
+          onAmortize={amortizeTx} />
       )}
 
       {selectedMerchant && (
@@ -2369,6 +2594,9 @@ export default function Transactions() {
           <button onClick={() => setBulkCatOpen(true)} className="btn" style={{ fontSize: 12 }}>Recategorize</button>
           <button onClick={() => setBulkTagOpen(true)} className="btn" style={{ fontSize: 12 }}>Add tag</button>
           <button onClick={() => setBulkGroupOpen(true)} className="btn" style={{ fontSize: 12 }}>Group</button>
+          {splitTemplates && splitTemplates.length > 0 && (
+            <button onClick={() => { setBulkTemplateId(splitTemplates[0].id); setBulkTemplateOpen(true); }} className="btn" style={{ fontSize: 12 }}>Apply template</button>
+          )}
           <button onClick={handleBulkToggleExclude} className="btn" style={{ fontSize: 12 }}>Exclude/Include</button>
           <button onClick={() => setDeleteConfirm(true)} className="btn" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(242,70,58,0.3)' }}>Delete</button>
           <button onClick={() => setSelectedIds(new Set())} style={{ fontSize: 13, color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', lineHeight: 1 }}>✕</button>
@@ -2441,12 +2669,55 @@ export default function Transactions() {
         </Modal>
       )}
 
+      {/* Bulk apply template modal */}
+      {bulkTemplateOpen && splitTemplates && splitTemplates.length > 0 && (
+        <Modal title={`Apply template to ${selectedIds.size} transaction${selectedIds.size !== 1 ? 's' : ''}`} onClose={() => setBulkTemplateOpen(false)}>
+          <p style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+            Each selected transaction will be split according to the chosen template. Already-split transactions will be skipped.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 16 }}>
+            {splitTemplates.map((t) => (
+              <label key={t.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', borderRadius: 7, border: `1px solid ${bulkTemplateId === t.id ? 'var(--accent)' : 'var(--border-2)'}`, background: bulkTemplateId === t.id ? 'rgba(91,87,245,0.05)' : 'var(--bg)', cursor: 'pointer' }}>
+                <input type="radio" name="bulk-template" value={t.id} checked={bulkTemplateId === t.id}
+                  onChange={() => setBulkTemplateId(t.id)} style={{ marginTop: 2, flexShrink: 0, accentColor: 'var(--accent)' }} />
+                <div>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', marginBottom: 3 }}>{t.name}</p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {t.splits.map((s, i) => (
+                      <span key={i} style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--card-alt)', borderRadius: 4, padding: '2px 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ width: 5, height: 5, borderRadius: '50%', background: getCategoryColor(s.category, categories), flexShrink: 0, display: 'inline-block' }} />
+                        {s.description} · {s.percentage}%
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button onClick={() => setBulkTemplateOpen(false)} className="btn" style={{ fontSize: 12 }}>Cancel</button>
+            <button onClick={() => {
+              const tpl = splitTemplates.find((t) => t.id === bulkTemplateId);
+              if (tpl && bulkSplitTx) {
+                bulkSplitTx([...selectedIds], tpl.splits as SplitRuleEntry[]);
+                setBulkTemplateOpen(false);
+                setSelectedIds(new Set());
+              }
+            }} className="btn btn-primary" style={{ fontSize: 12 }} disabled={!bulkTemplateId}>
+              Apply
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {/* Rules manager modal */}
       {showRules && (
         <RulesModal merchantRules={merchantRules} categories={categories}
           onCreate={createMerchantRule} onDelete={deleteMerchantRule} onUpdate={updateMerchantRule}
           onClose={() => setShowRules(false)}
-          splitRules={splitRules} onDeleteSplitRule={deleteSplitRule} />
+          splitRules={splitRules} onDeleteSplitRule={deleteSplitRule}
+          splitTemplates={splitTemplates} onCreateTemplate={createSplitTemplate}
+          onDeleteTemplate={deleteSplitTemplate} onRenameTemplate={renameSplitTemplate} />
       )}
 
       {/* Merchant rule prompt toast */}

@@ -4,7 +4,7 @@ import {
   createContext, useContext, useState, useEffect, useCallback,
   useRef, type ReactNode,
 } from 'react';
-import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange, ChangeHistoryEntry, SplitRule, SplitRules } from './types';
+import type { Transaction, Category, Budget, CarryOver, MerchantRules, Goal, DateRange, ChangeHistoryEntry, SplitRule, SplitRules, SplitTemplate, SplitRuleEntry } from './types';
 import {
   loadTransactions, saveTransactions,
   loadCategories, saveCategories,
@@ -13,6 +13,7 @@ import {
   loadDarkMode, saveDarkMode,
   loadMerchantRules, addMerchantRule, deleteMerchantRule, updateMerchantRule,
   loadSplitRules, addSplitRule, removeSplitRule,
+  loadSplitTemplates, addSplitTemplate, removeSplitTemplate, updateSplitTemplate,
 } from './storage';
 import { DEFAULT_CATEGORIES, DEFAULT_BUDGETS } from './constants';
 import { autoCategorizeAll, aiCategorizeUnknown, applyLearnedRules, isTransfer } from './autoCategory';
@@ -167,6 +168,16 @@ interface BudgetContextValue {
   createSplitRule: (rule: SplitRule) => void;
   deleteSplitRule: (merchantKey: string) => void;
 
+  // Split templates
+  splitTemplates: SplitTemplate[];
+  createSplitTemplate: (t: SplitTemplate) => void;
+  deleteSplitTemplate: (id: string) => void;
+  renameSplitTemplate: (id: string, name: string) => void;
+
+  // Advanced split
+  amortizeTx: (parentId: string, months: number, startYearMonth: string, category: string, descOverride?: string) => void;
+  bulkSplitTx: (parentIds: string[], splits: SplitRuleEntry[]) => void;
+
   // Goals
   addGoal: (g: Omit<Goal, 'id'>) => void;
   updateGoal: (id: string, updates: Partial<Goal>) => void;
@@ -213,8 +224,9 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
   }));
   const [goals,        setGoals]        = useState<Goal[]>([]);
   const [merchantRules, setMerchantRules] = useState<MerchantRules>({});
-  const [splitRules,    setSplitRules]    = useState<SplitRules>({});
-  const [privacyMode,   setPrivacyMode]   = useState(false);
+  const [splitRules,     setSplitRules]     = useState<SplitRules>({});
+  const [splitTemplates, setSplitTemplates] = useState<SplitTemplate[]>([]);
+  const [privacyMode,    setPrivacyMode]    = useState(false);
 
   // Hydrate from localStorage on mount (client only)
   useEffect(() => {
@@ -224,6 +236,7 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     setCarryOver(loadCarryOver());
     setMerchantRules(loadMerchantRules());
     setSplitRules(loadSplitRules());
+    setSplitTemplates(loadSplitTemplates());
     const dm = loadDarkMode();
     setDark(dm);
     document.documentElement.classList.toggle('dark', dm);
@@ -415,6 +428,101 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
     }, []
   );
 
+  const amortizeTx = useCallback(
+    (parentId: string, months: number, startYearMonth: string, category: string, descOverride?: string) => {
+      setTxs((prev) => {
+        const parent = prev.find((t) => t.id === parentId);
+        if (!parent) return prev;
+        const total = Math.abs(parent.amount);
+        const isIncome = parent.amount < 0;
+        const perMonth = Math.round(total / months * 100) / 100;
+        const [yr, mo] = startYearMonth.split('-').map(Number);
+        let remaining = total;
+        const children = Array.from({ length: months }, (_, i) => {
+          const d = new Date(yr, mo - 1 + i, 1);
+          const amt = i === months - 1
+            ? Math.round(remaining * 100) / 100
+            : perMonth;
+          remaining = Math.round((remaining - perMonth) * 100) / 100;
+          const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+          return {
+            ...parent,
+            id: `${parentId}_amort_${i + 1}`,
+            amount: isIncome ? -amt : amt,
+            category,
+            date: dateStr,
+            description: descOverride || parent.description,
+            displayName: descOverride || parent.displayName,
+            isSplit: true,
+            isAmortized: true,
+            splitParentId: parentId,
+          };
+        });
+        return prev
+          .map((t) => t.id === parentId ? {
+            ...t,
+            isSplit: true,
+            isAmortized: true,
+            excluded: true,
+            splitChildren: children.map((c) => ({ description: c.description, amount: c.amount, category: c.category })),
+          } : t)
+          .concat(children);
+      });
+    }, []
+  );
+
+  const bulkSplitTx = useCallback(
+    (parentIds: string[], splits: SplitRuleEntry[]) => {
+      setTxs((prev) => {
+        let next = [...prev];
+        for (const parentId of parentIds) {
+          const parent = next.find((t) => t.id === parentId);
+          if (!parent || parent.splitChildren?.length || parent.splitParentId) continue;
+          const total = Math.abs(parent.amount);
+          const isIncome = parent.amount < 0;
+          let remaining = total;
+          const children = splits.map((s, i) => {
+            const amt = i === splits.length - 1
+              ? Math.round(remaining * 100) / 100
+              : Math.round(total * s.percentage / 100 * 100) / 100;
+            remaining = Math.round((remaining - amt) * 100) / 100;
+            return {
+              ...parent,
+              id: `${parentId}_split_${i + 1}`,
+              amount: isIncome ? -amt : amt,
+              category: s.category,
+              description: s.description || parent.description,
+              isSplit: true,
+              splitParentId: parentId,
+            };
+          });
+          next = next
+            .map((t) => t.id === parentId ? {
+              ...t,
+              isSplit: true,
+              splitChildren: children.map((c) => ({ description: c.description, amount: c.amount, category: c.category })),
+            } : t)
+            .concat(children);
+        }
+        return next;
+      });
+    }, []
+  );
+
+  // ── Split templates ──
+  const createSplitTemplate = useCallback((t: SplitTemplate) => {
+    addSplitTemplate(t);
+    setSplitTemplates(loadSplitTemplates());
+  }, []);
+  const deleteSplitTemplateFn = useCallback((id: string) => {
+    removeSplitTemplate(id);
+    setSplitTemplates(loadSplitTemplates());
+  }, []);
+  const renameSplitTemplate = useCallback((id: string, name: string) => {
+    updateSplitTemplate(id, { name });
+    setSplitTemplates(loadSplitTemplates());
+  }, []);
+
   // ── Goals ──
   const addGoal = useCallback((g: Omit<Goal, 'id'>) => {
     setGoals((p) => [...p, { ...g, id: `goal_${Date.now()}` }]);
@@ -461,6 +569,8 @@ export function BudgetProvider({ children }: { children: ReactNode }) {
       addTx, deleteTx, editTx, importTxs, excludeTx, batchEditTxs, splitTx, createMerchantRule,
       deleteMerchantRule: deleteMerchantRuleFn, updateMerchantRule: updateMerchantRuleFn,
       createSplitRule, deleteSplitRule: deleteSplitRuleFn,
+      splitTemplates, createSplitTemplate, deleteSplitTemplate: deleteSplitTemplateFn, renameSplitTemplate,
+      amortizeTx, bulkSplitTx,
       addGoal, updateGoal, deleteGoal,
       updateBudget, toggleCarryOver,
       addCategory, deleteCategory, editCategory,
