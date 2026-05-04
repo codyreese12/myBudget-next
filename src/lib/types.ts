@@ -45,6 +45,7 @@ export interface Transaction {
   taxDeductible?: boolean;
   groupId?: string;
   groupName?: string;
+  ownership?: 'mine' | 'theirs' | 'ours';
 }
 
 export interface SplitChild {

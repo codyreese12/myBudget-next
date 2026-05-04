@@ -7,6 +7,7 @@ import { importCSV } from '@/lib/csvImport';
 import { cleanDescription } from '@/lib/autoCategory';
 import type { Transaction, Category, MerchantRules, ChangeHistoryEntry, SplitRule, SplitRules } from '@/lib/types';
 import { useKeyboardShortcuts } from '@/lib/useKeyboardShortcuts';
+import TransactionChat from '@/components/TransactionChat';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function usd(n: number, d = 2) {
@@ -152,6 +153,8 @@ const IC = {
   rules:  'M2 3.5h10M2 7h7M2 10.5h8',
   save:      'M2 12V2.5A.5.5 0 012.5 2h7l2.5 2.5V12a.5.5 0 01-.5.5H2.5A.5.5 0 012 12zM5 12V8h4v4M5 2v3h5V2',
   paperclip: 'M11.5 4.5v6a4 4 0 01-8 0V3a2.5 2.5 0 015 0v7a1 1 0 01-2 0V4.5',
+  columns:   'M1.5 2h3v10h-3zM5.5 2h3v10h-3zM9.5 2h3v10h-3z',
+  calIcon:   'M1.5 4.5h11M1.5 4.5V12a.5.5 0 00.5.5h10a.5.5 0 00.5-.5V4.5M1.5 4.5V3A.5.5 0 012 2.5h10a.5.5 0 01.5.5v2M5 2.5v2M9 2.5v2M4 7.5h2M4 10h2M7.5 7.5h2M7.5 10h2',
 };
 
 // ── Attachment storage ─────────────────────────────────────────────────────────
@@ -202,6 +205,16 @@ function loadPresets(): FilterPreset[] {
 function savePresets(presets: FilterPreset[]) {
   localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
 }
+
+// ── Column visibility ──────────────────────────────────────────────────────────
+const COL_VIS_KEY = 'budget_col_vis';
+const DEFAULT_COL_VIS = { account: true, tags: true, notes: false, originalDesc: false };
+type ColVis = typeof DEFAULT_COL_VIS;
+
+function loadColVis(): ColVis {
+  try { return { ...DEFAULT_COL_VIS, ...JSON.parse(localStorage.getItem(COL_VIS_KEY) ?? 'null') }; } catch { return { ...DEFAULT_COL_VIS }; }
+}
+function saveColVis(v: ColVis) { localStorage.setItem(COL_VIS_KEY, JSON.stringify(v)); }
 
 // ── Modal ──────────────────────────────────────────────────────────────────────
 function Modal({ title, onClose, children, maxWidth = 400 }: { title: string; onClose: () => void; children: React.ReactNode; maxWidth?: number }) {
@@ -405,6 +418,14 @@ function SplitModal({ tx, categories, onSplit, onClose, splitRules, onCreateSpli
   );
 }
 
+// ── Ownership ─────────────────────────────────────────────────────────────────
+type OwnershipValue = 'mine' | 'theirs' | 'ours';
+const OWNERSHIP: Record<OwnershipValue, { label: string; color: string; bg: string; border: string }> = {
+  mine:   { label: 'Mine',   color: '#3b82f6', bg: 'rgba(59,130,246,0.1)',  border: 'rgba(59,130,246,0.25)' },
+  theirs: { label: 'Theirs', color: '#f43f5e', bg: 'rgba(244,63,94,0.1)',   border: 'rgba(244,63,94,0.25)'  },
+  ours:   { label: 'Ours',   color: '#14b8a6', bg: 'rgba(20,184,166,0.1)',  border: 'rgba(20,184,166,0.25)' },
+};
+
 // ── Filter popover ─────────────────────────────────────────────────────────────
 interface FilterItem { id: string; label: string; color?: string }
 function FilterPopover({ pos, items, selected, onToggle, onClear, onClose, title, deletableIds, onDeleteItem }: {
@@ -494,6 +515,321 @@ function InlineCatPopover({ pos, tx, categories, onSelect, onClose }: { pos: DOM
   );
 }
 
+// ── Calendar view ─────────────────────────────────────────────────────────────
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DOW_LABELS  = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function CalendarView({ filtered, dateRange, categories, privacyMode, onTxClick }: {
+  filtered: Transaction[];
+  dateRange: { start: Date; end: Date };
+  categories: Category[];
+  privacyMode: boolean;
+  onTxClick: (txId: string) => void;
+}) {
+  const [dayPopover, setDayPopover] = useState<{ date: string; rect: DOMRect } | null>(null);
+
+  const fmtAmt = (n: number) =>
+    privacyMode ? '••' : '$' + Math.round(n).toLocaleString('en-US');
+
+  // Group all filtered txs by date
+  const byDate = useMemo(() => {
+    const map: Record<string, Transaction[]> = {};
+    for (const tx of filtered) {
+      if (!map[tx.date]) map[tx.date] = [];
+      map[tx.date].push(tx);
+    }
+    return map;
+  }, [filtered]);
+
+  // Daily expense totals (non-income, non-excluded) — used for heat-map
+  const dailySpend = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const [date, txs] of Object.entries(byDate)) {
+      const spend = txs
+        .filter((t) => !t.excluded && catType(t.category, categories) !== 'income')
+        .reduce((s, t) => s + Math.abs(t.amount), 0);
+      if (spend > 0) map[date] = spend;
+    }
+    return map;
+  }, [byDate, categories]);
+
+  const maxSpend = useMemo(() => Math.max(0, ...Object.values(dailySpend)), [dailySpend]);
+
+  // Every calendar month covered by the date range
+  const months = useMemo(() => {
+    const out: { year: number; month: number }[] = [];
+    const cur = new Date(dateRange.start.getFullYear(), dateRange.start.getMonth(), 1);
+    const last = new Date(dateRange.end.getFullYear(), dateRange.end.getMonth(), 1);
+    while (cur <= last) {
+      out.push({ year: cur.getFullYear(), month: cur.getMonth() });
+      cur.setMonth(cur.getMonth() + 1);
+    }
+    return out;
+  }, [dateRange]);
+
+  const toISO = (y: number, m: number, d: number) =>
+    `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+  const inRange = (iso: string) => {
+    const d = new Date(iso + 'T00:00:00');
+    return d >= dateRange.start && d <= dateRange.end;
+  };
+
+  // Map spend to opacity — 0 spend = 0, max spend = 0.72
+  const intensity = (spend: number) =>
+    maxSpend > 0 && spend > 0 ? Math.max(0.08, (spend / maxSpend) * 0.72) : 0;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const multiCol = months.length >= 4;
+
+  return (
+    <>
+      {/* Backdrop closes the day popover */}
+      {dayPopover && (
+        <div onClick={() => setDayPopover(null)} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />
+      )}
+
+      <div style={multiCol
+        ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14 }
+        : { display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+        {months.map(({ year, month }) => {
+          const firstDow   = new Date(year, month, 1).getDay();         // 0=Sun
+          const daysInMonth = new Date(year, month + 1, 0).getDate();
+          const cells: (number | null)[] = [
+            ...Array(firstDow).fill(null),
+            ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+          ];
+          while (cells.length % 7 !== 0) cells.push(null);
+
+          return (
+            <div key={`${year}-${month}`} className="card" style={{ padding: multiCol ? '14px 12px' : '16px 20px' }}>
+              <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)', marginBottom: 10 }}>
+                {MONTH_NAMES[month]} {year}
+              </p>
+
+              {/* Weekday header */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 2 }}>
+                {DOW_LABELS.map((d) => (
+                  <div key={d} style={{ textAlign: 'center', fontSize: 9, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.06em', padding: '2px 0', textTransform: 'uppercase' }}>
+                    {d}
+                  </div>
+                ))}
+              </div>
+
+              {/* Day cells */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
+                {cells.map((day, idx) => {
+                  if (day === null) return <div key={`e${idx}`} style={{ minHeight: 50 }} />;
+
+                  const iso      = toISO(year, month, day);
+                  const active   = inRange(iso);
+                  const spend    = dailySpend[iso] ?? 0;
+                  const alpha    = active ? intensity(spend) : 0;
+                  const txsDay   = byDate[iso] ?? [];
+                  const hasTxs   = txsDay.length > 0;
+                  const isToday  = iso === today;
+                  // Switch text to white when cell is dark enough to be unreadable
+                  const darkCell = alpha > 0.38;
+
+                  return (
+                    <button
+                      key={iso}
+                      title={hasTxs ? `${txsDay.length} transaction${txsDay.length !== 1 ? 's' : ''}` : undefined}
+                      onClick={(e) => {
+                        if (!hasTxs) return;
+                        e.stopPropagation();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setDayPopover((prev) => prev?.date === iso ? null : { date: iso, rect });
+                      }}
+                      style={{
+                        minHeight: 50,
+                        borderRadius: 6,
+                        border: isToday
+                          ? '2px solid var(--accent)'
+                          : '1px solid transparent',
+                        background: alpha > 0
+                          ? `rgba(242,70,58,${alpha})`
+                          : active ? 'var(--card-alt)' : 'transparent',
+                        opacity: active ? 1 : 0.22,
+                        cursor: hasTxs ? 'pointer' : 'default',
+                        display: 'flex', flexDirection: 'column',
+                        alignItems: 'center', justifyContent: 'center',
+                        padding: '4px 2px', gap: 2,
+                        transition: 'filter 0.1s',
+                      }}
+                      onMouseEnter={(e) => { if (hasTxs) e.currentTarget.style.filter = 'brightness(0.88)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.filter = 'none'; }}
+                    >
+                      <span style={{
+                        fontSize: multiCol ? 11 : 12,
+                        fontWeight: isToday ? 700 : 400,
+                        color: darkCell ? '#fff' : 'var(--text-1)',
+                        lineHeight: 1,
+                      }}>
+                        {day}
+                      </span>
+                      {spend > 0 && active && (
+                        <span style={{
+                          fontSize: 8, fontWeight: 600, lineHeight: 1,
+                          color: darkCell ? 'rgba(255,255,255,0.85)' : 'var(--text-3)',
+                          maxWidth: '100%', overflow: 'hidden',
+                          textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {fmtAmt(spend)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Day detail popover */}
+      {dayPopover && (() => {
+        const txsDay = [...(byDate[dayPopover.date] ?? [])].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+        const { rect } = dayPopover;
+        const panelW = 268;
+        const left = Math.max(8, Math.min(rect.left, window.innerWidth - panelW - 8));
+        const top  = rect.bottom + 8;
+        return (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'fixed', top, left, zIndex: 40, width: panelW,
+              background: 'var(--panel)', border: '1px solid var(--border)',
+              borderRadius: 10, boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
+            }}
+          >
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)' }}>
+                {new Date(dayPopover.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+              </span>
+              <button onClick={() => setDayPopover(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: '0 2px', fontSize: 18, lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+              {txsDay.map((tx) => {
+                const isInc     = catType(tx.category, categories) === 'income';
+                const display   = tx.displayName || cleanDescription(tx.description) || tx.description;
+                const catColor  = getCategoryColor(tx.category, categories);
+                return (
+                  <button
+                    key={tx.id}
+                    onClick={() => { onTxClick(tx.id); setDayPopover(null); }}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: catColor, flexShrink: 0 }} />
+                    <span style={{ flex: 1, fontSize: 12, color: tx.excluded ? 'var(--text-3)' : 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: tx.excluded ? 'line-through' : 'none' }}>
+                      {display}
+                    </span>
+                    <span style={{ fontSize: 12, fontWeight: 600, flexShrink: 0, color: isInc ? 'var(--green)' : tx.excluded ? 'var(--text-3)' : 'var(--text-1)' }}>
+                      {privacyMode ? '••••' : `${isInc ? '+' : '-'}$${Math.abs(tx.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+    </>
+  );
+}
+
+// ── Merchant history panel ─────────────────────────────────────────────────────
+function MerchantPanel({ merchantName, allTxs, onClose, privacyMode }: {
+  merchantName: string; allTxs: Transaction[];
+  onClose: () => void; privacyMode: boolean;
+}) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const usdFmt = (n: number) => privacyMode ? '••••' : '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const merchantTxs = useMemo(() =>
+    allTxs
+      .filter((tx) => (tx.displayName || cleanDescription(tx.description) || tx.description) === merchantName)
+      .sort((a, b) => b.date.localeCompare(a.date)),
+    [allTxs, merchantName]);
+
+  const totalSpent = merchantTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+
+  const avgPerMonth = useMemo(() => {
+    if (merchantTxs.length === 0) return 0;
+    const sorted = [...merchantTxs].sort((a, b) => a.date.localeCompare(b.date));
+    const first = new Date(sorted[0].date + 'T00:00:00');
+    const last  = new Date(sorted[sorted.length - 1].date + 'T00:00:00');
+    const months = Math.max(1, (last.getFullYear() - first.getFullYear()) * 12 + (last.getMonth() - first.getMonth()) + 1);
+    return totalSpent / months;
+  }, [merchantTxs, totalSpent]);
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />
+      <div onClick={(e) => e.stopPropagation()} style={{
+        position: 'fixed', right: 0, top: 52, width: 360, height: 'calc(100vh - 52px)',
+        background: 'var(--panel)', borderLeft: '1px solid var(--border)',
+        zIndex: 40, display: 'flex', flexDirection: 'column',
+        transform: visible ? 'translateX(0)' : 'translateX(100%)',
+        transition: 'transform 0.2s ease',
+      }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexShrink: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-1)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{merchantName}</p>
+            <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 3 }}>Merchant history</p>
+          </div>
+          <button onClick={onClose} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4, flexShrink: 0, marginTop: 2 }}>
+            <Icon d={IC.close} size={13} />
+          </button>
+        </div>
+
+        <div style={{ padding: '20px 20px 16px', textAlign: 'center', borderBottom: '1px solid var(--border-2)', flexShrink: 0 }}>
+          <p style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-1)' }}>{usdFmt(totalSpent)}</p>
+          <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>total spent</p>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 32, marginTop: 14 }}>
+            <div>
+              <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-1)' }}>{merchantTxs.length}</p>
+              <p style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>transactions</p>
+            </div>
+            <div>
+              <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-1)' }}>{usdFmt(avgPerMonth)}</p>
+              <p style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>avg / month</p>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {merchantTxs.length === 0 ? (
+            <p style={{ padding: 24, fontSize: 13, color: 'var(--text-3)', textAlign: 'center' }}>No transactions found.</p>
+          ) : merchantTxs.map((tx) => (
+            <div key={tx.id} style={{ padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border-2)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-1)' }}>
+                  {new Date(tx.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                </p>
+                <p style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>{tx.category}</p>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0, color: tx.excluded ? 'var(--text-3)' : 'var(--text-1)', textDecoration: tx.excluded ? 'line-through' : 'none' }}>
+                {usdFmt(tx.amount)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Detail slide-in panel ──────────────────────────────────────────────────────
 function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSplit, onClose, userTags, onUpdateUserTags, onCategoryChanged, splitRules, onCreateSplitRule, onAttachmentsChanged }: {
   tx: Transaction; categories: Category[]; allTxs: Transaction[];
@@ -521,10 +857,11 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
   const [applyRuleConfirm, setApplyRuleConfirm] = useState(false);
   const [attachments,      setAttachments]      = useState<Attachment[]>(() => loadAttachmentsForTx(tx.id));
   const [sizeWarning,      setSizeWarning]      = useState<string | null>(null);
+  const [ownership,        setOwnership]        = useState<OwnershipValue | undefined>(tx.ownership);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
-  useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); setAttachments(loadAttachmentsForTx(tx.id)); setSizeWarning(null); }, [tx.id]); // eslint-disable-line
+  useEffect(() => { setCat(tx.category); setDisplayName(tx.displayName ?? ''); setNotes(tx.notes ?? ''); setTags(tx.tags ?? []); setAttachments(loadAttachmentsForTx(tx.id)); setSizeWarning(null); setOwnership(tx.ownership); }, [tx.id]); // eslint-disable-line
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', h);
@@ -637,7 +974,7 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
     if (dn !== tx.displayName) {
       newEntries.push({ field: 'Description', oldValue: tx.displayName ?? '', newValue: dn ?? '', timestamp: now });
     }
-    onEdit(tx.id, { category: cat, notes, tags, needsReview: false, displayName: dn, ...(newEntries.length > 0 && { changeHistory: newEntries }) });
+    onEdit(tx.id, { category: cat, notes, tags, needsReview: false, displayName: dn, ownership, ...(newEntries.length > 0 && { changeHistory: newEntries }) });
     if (catChanged) onCategoryChanged?.(tx.description, cat);
     onClose();
   };
@@ -729,6 +1066,19 @@ function DetailPanel({ tx, categories, allTxs, onEdit, onDelete, onExclude, onSp
             <label className="label" style={{ display: 'block', marginBottom: 6 }}>Notes</label>
             <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Add a note…"
               style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: 13, padding: '8px 12px', lineHeight: 1.5, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-1)', boxSizing: 'border-box' }} />
+          </div>
+
+          <div>
+            <label className="label" style={{ display: 'block', marginBottom: 6 }}>Ownership</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {(Object.entries(OWNERSHIP) as [OwnershipValue, typeof OWNERSHIP[OwnershipValue]][]).map(([key, cfg]) => (
+                <button key={key}
+                  onClick={() => setOwnership(ownership === key ? undefined : key)}
+                  style={{ flex: 1, height: 34, fontSize: 12, fontWeight: 500, borderRadius: 7, border: `1.5px solid ${ownership === key ? cfg.color : 'var(--border)'}`, background: ownership === key ? cfg.bg : 'var(--bg)', color: ownership === key ? cfg.color : 'var(--text-2)', cursor: 'pointer', transition: 'all 0.15s' }}>
+                  {cfg.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div>
@@ -1093,11 +1443,18 @@ function RulesModal({ merchantRules, categories, onCreate, onDelete, onUpdate, o
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 export default function Transactions() {
-  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule, privacyMode } = useBudget();
+  const { filteredTxs, txs: allTxs, categories, addTx, deleteTx, editTx, importTxs, excludeTx, splitTx, batchEditTxs, createMerchantRule, deleteMerchantRule, updateMerchantRule, merchantRules, splitRules, createSplitRule, deleteSplitRule, privacyMode, dateRange } = useBudget();
   const usd = (n: number, d = 2) => privacyMode ? '••••' : '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 
   const [showAdd,         setShowAdd]         = useState(false);
   const [selectedId,      setSelectedId]      = useState<string | null>(null);
+  const [selectedMerchant, setSelectedMerchant] = useState<string | null>(null);
+  const [columnVis,        setColumnVis]        = useState<ColVis>(() => loadColVis());
+  const [colMenuOpen,      setColMenuOpen]      = useState(false);
+  const [colMenuRect,      setColMenuRect]      = useState<DOMRect | null>(null);
+  const [ownerFilters,     setOwnerFilters]     = useState(new Set<OwnershipValue>());
+  const [ownerFilterOpen,  setOwnerFilterOpen]  = useState(false);
+  const [ownerFilterRect,  setOwnerFilterRect]  = useState<DOMRect | null>(null);
   const [catFilters,      setCatFilters]      = useState(new Set<string>());
   const [tagFilters,      setTagFilters]      = useState(new Set<string>());
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
@@ -1131,9 +1488,13 @@ export default function Transactions() {
   const [savePresetOpen,     setSavePresetOpen]     = useState(false);
   const [presetName,         setPresetName]         = useState('');
   const [showRunningBalance,  setShowRunningBalance]  = useState(false);
+  const [viewMode,            setViewMode]            = useState<'list' | 'calendar'>(() => {
+    try { return localStorage.getItem('txViewMode') === 'calendar' ? 'calendar' : 'list'; } catch { return 'list'; }
+  });
   const [recurringPopover,    setRecurringPopover]    = useState<{ tx: Transaction; anchor: DOMRect } | null>(null);
   const [attachedTxIds,       setAttachedTxIds]       = useState<Set<string>>(() => { try { return txsWithAttachmentsSet(); } catch { return new Set(); } });
   const [showShortcuts,       setShowShortcuts]       = useState(false);
+  const [showChat,            setShowChat]            = useState(false);
   const refreshAttachmentSet = useCallback(() => { try { setAttachedTxIds(txsWithAttachmentsSet()); } catch { /* */ } }, []);
 
   useEffect(() => { setUserTags(loadUserTags()); }, []);
@@ -1282,6 +1643,7 @@ export default function Transactions() {
     .filter((t) => !taxDeductOnly || !!t.taxDeductible)
     .filter((t) => tagFilters.size === 0 || (t.tags ?? []).some((tag) => tagFilters.has(tag)))
     .filter((t) => groupFilters.size === 0 || (t.groupName ? groupFilters.has(t.groupName) : false))
+    .filter((t) => ownerFilters.size === 0 || (t.ownership ? ownerFilters.has(t.ownership) : false))
     .filter((t) => !search || (t.displayName || cleanDescription(t.description) || t.description || '').toLowerCase().includes(search.toLowerCase()) || (t.description || '').toLowerCase().includes(search.toLowerCase()))
     .filter((t) => {
       const abs = Math.abs(t.amount);
@@ -1433,9 +1795,14 @@ export default function Transactions() {
     setSelectedIds(new Set());
   }, [selectedIds, batchEditTxs]);
 
-  const openCatFilter = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); setGroupFilterOpen(false); };
-  const openTagFilter = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); setGroupFilterOpen(false); };
-  const openGroupFilter = (e: React.MouseEvent) => { setGroupFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setGroupFilterOpen((v) => !v); setCatFilterOpen(false); setTagFilterOpen(false); };
+  const toggleCol = (key: keyof ColVis) => {
+    setColumnVis((prev) => { const next = { ...prev, [key]: !prev[key] }; saveColVis(next); return next; });
+  };
+
+  const openCatFilter   = (e: React.MouseEvent) => { setCatFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setCatFilterOpen((v) => !v); setTagFilterOpen(false); setGroupFilterOpen(false); setOwnerFilterOpen(false); };
+  const openTagFilter   = (e: React.MouseEvent) => { setTagFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setTagFilterOpen((v) => !v); setCatFilterOpen(false); setGroupFilterOpen(false); setOwnerFilterOpen(false); };
+  const openGroupFilter = (e: React.MouseEvent) => { setGroupFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setGroupFilterOpen((v) => !v); setCatFilterOpen(false); setTagFilterOpen(false); setOwnerFilterOpen(false); };
+  const openOwnerFilter = (e: React.MouseEvent) => { setOwnerFilterRect((e.currentTarget as HTMLElement).getBoundingClientRect()); setOwnerFilterOpen((v) => !v); setCatFilterOpen(false); setTagFilterOpen(false); setGroupFilterOpen(false); };
 
   const handleSavePreset = useCallback(() => {
     const name = presetName.trim();
@@ -1474,7 +1841,7 @@ export default function Transactions() {
 
   const catItems = categories.map((c) => ({ id: c.name, label: c.name, color: getCategoryColor(c.name, categories) }));
   const tagItems = allTagsList.map((t) => ({ id: t, label: `#${t}` }));
-  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || groupFilters.size > 0 || needsReviewOnly || taxDeductOnly;
+  const filterActive = catFilters.size > 0 || tagFilters.size > 0 || groupFilters.size > 0 || needsReviewOnly || taxDeductOnly || ownerFilters.size > 0;
 
   const ctrl = (extra: React.CSSProperties = {}): React.CSSProperties => ({
     height: 36, fontSize: 12, display: 'flex', alignItems: 'center', gap: 5,
@@ -1495,6 +1862,16 @@ export default function Transactions() {
           ))}
         </div>
         <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
+          {/* View toggle */}
+          <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', flexShrink: 0 }}>
+            {(['list', 'calendar'] as const).map((mode) => (
+              <button key={mode} onClick={() => { setViewMode(mode); try { localStorage.setItem('txViewMode', mode); } catch { /* */ } }}
+                title={mode === 'list' ? 'List view' : 'Calendar view'}
+                style={{ width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderLeft: mode === 'calendar' ? '1px solid var(--border)' : 'none', cursor: 'pointer', background: viewMode === mode ? 'var(--accent)' : 'var(--card)', color: viewMode === mode ? '#fff' : 'var(--text-3)', transition: 'all 0.15s' }}>
+                <Icon d={mode === 'list' ? IC.rules : IC.calIcon} size={12} />
+              </button>
+            ))}
+          </div>
           <button className="btn" onClick={handleExport} disabled={sorted.length === 0} style={{ opacity: sorted.length === 0 ? 0.4 : 1, fontSize: 12, padding: '6px 12px' }}>
             <Icon d={IC.export} /> Export
           </button>
@@ -1504,6 +1881,14 @@ export default function Transactions() {
           <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleImport} />
           <button className="btn" onClick={() => setShowRules(true)} style={{ fontSize: 12, padding: '6px 12px' }}>
             <Icon d={IC.rules} /> Rules
+          </button>
+          <button className="btn" onClick={() => setShowChat((v) => !v)}
+            style={{ fontSize: 12, padding: '6px 12px', ...(showChat ? { background: 'rgba(91,87,245,0.1)', borderColor: 'rgba(91,87,245,0.4)', color: 'var(--accent)' } : {}) }}>
+            <svg width={12} height={12} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <path d="M6 1a5 5 0 0 1 0 10H2l-1 1V6a5 5 0 0 1 5-5z" />
+              <path d="M4 5h4M4 7h2" />
+            </svg>
+            Ask AI
           </button>
           <button className="btn btn-primary" onClick={() => setShowAdd(true)} style={{ fontSize: 12, padding: '6px 12px' }}>
             <Icon d={IC.plus} /> Add
@@ -1572,6 +1957,9 @@ export default function Transactions() {
         <button onClick={() => setTaxDeductOnly((v) => !v)} style={{ ...ctrl(), border: `1px solid ${taxDeductOnly ? 'rgba(52,211,153,0.5)' : 'var(--border)'}`, color: taxDeductOnly ? 'var(--green)' : 'var(--text-1)', background: taxDeductOnly ? 'rgba(52,211,153,0.08)' : 'var(--card)' }}>
           Tax
         </button>
+        <button onClick={openOwnerFilter} style={{ ...ctrl(), border: `1px solid ${ownerFilters.size > 0 ? 'rgba(59,130,246,0.5)' : 'var(--border)'}`, color: ownerFilters.size > 0 ? '#3b82f6' : 'var(--text-1)', background: ownerFilters.size > 0 ? 'rgba(59,130,246,0.08)' : 'var(--card)' }}>
+          {ownerFilters.size > 0 ? `Owner · ${ownerFilters.size}` : 'Owner'} <Icon d={IC.chevD} size={10} />
+        </button>
         <select value={sort} onChange={(e) => setSort(e.target.value)} style={ctrl({ paddingRight: 6 })}>
           <option value="date-desc">Newest</option>
           <option value="date-asc">Oldest</option>
@@ -1582,7 +1970,7 @@ export default function Transactions() {
         <input type="number" placeholder="Min $" value={minAmt} onChange={(e) => setMinAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         <input type="number" placeholder="Max $" value={maxAmt} onChange={(e) => setMaxAmt(e.target.value)} style={{ width: 72, height: 36, fontSize: 12, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-1)', flexShrink: 0 }} />
         {filterActive && (
-          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setGroupFilters(new Set()); setNeedsReviewOnly(false); setTaxDeductOnly(false); }}
+          <button onClick={() => { setCatFilters(new Set()); setTagFilters(new Set()); setGroupFilters(new Set()); setNeedsReviewOnly(false); setTaxDeductOnly(false); setOwnerFilters(new Set()); }}
             style={{ height: 36, fontSize: 11, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'none', color: 'var(--text-3)', cursor: 'pointer', flexShrink: 0 }}>Clear</button>
         )}
         <button onClick={() => { setSavePresetOpen((v) => !v); setPresetName(''); }}
@@ -1649,6 +2037,12 @@ export default function Transactions() {
         </div>
       )}
 
+      {/* AI Chat panel */}
+      {showChat && (
+        <TransactionChat allTxs={allTxs} onClose={() => setShowChat(false)} />
+      )}
+
+      {viewMode === 'list' ? (<>
       {/* Transaction list header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
         {showRunningBalance && multipleAccounts && (
@@ -1656,6 +2050,12 @@ export default function Transactions() {
             ⚠ Multiple accounts detected — balance shown across all accounts combined
           </span>
         )}
+        <button
+          onClick={(e) => { setColMenuRect(e.currentTarget.getBoundingClientRect()); setColMenuOpen((v) => !v); }}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: colMenuOpen ? 'rgba(91,87,245,0.1)' : 'transparent', color: colMenuOpen ? 'var(--accent)' : 'var(--text-3)', border: `1px solid ${colMenuOpen ? 'rgba(91,87,245,0.3)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
+          <Icon d={IC.columns} size={10} />
+          Columns
+        </button>
         <button
           onClick={toggleRunningBalance}
           style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 99, cursor: 'pointer', background: showRunningBalance ? 'rgba(91,87,245,0.1)' : 'transparent', color: showRunningBalance ? 'var(--accent)' : 'var(--text-3)', border: `1px solid ${showRunningBalance ? 'rgba(91,87,245,0.3)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
@@ -1702,6 +2102,7 @@ export default function Transactions() {
                         if (anySelected) {
                           setSelectedIds((p) => { const n = new Set(p); n.has(tx.id) ? n.delete(tx.id) : n.add(tx.id); return n; });
                         } else {
+                          setSelectedMerchant(null);
                           setSelectedId(isSelected ? null : tx.id);
                         }
                       }}
@@ -1724,7 +2125,12 @@ export default function Transactions() {
                       </div>
 
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: isExcluded ? 'line-through' : 'none' }}>{displayStr}</p>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setSelectedId(null); setSelectedMerchant(displayStr); }}
+                          title={`View ${displayStr} history`}
+                          style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: isExcluded ? 'line-through' : 'none', background: 'none', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left', width: '100%', display: 'block' }}>
+                          {displayStr}
+                        </button>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 3, overflow: 'hidden' }}>
                           {isExcluded ? (
                             <span style={{ fontSize: 11, color: 'var(--text-3)' }}>Excluded</span>
@@ -1734,6 +2140,11 @@ export default function Transactions() {
                               title="Click to change category">
                               {tx.category}
                             </button>
+                          )}
+                          {tx.ownership && (
+                            <span style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: OWNERSHIP[tx.ownership].bg, color: OWNERSHIP[tx.ownership].color, border: `1px solid ${OWNERSHIP[tx.ownership].border}`, flexShrink: 0 }}>
+                              {OWNERSHIP[tx.ownership].label}
+                            </span>
                           )}
                           {tx.isDuplicate && (
                             <span title="Possible duplicate" style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(245,162,0,0.12)', color: 'var(--amber)', border: '1px solid rgba(245,162,0,0.25)', flexShrink: 0 }}>~dup</span>
@@ -1766,10 +2177,10 @@ export default function Transactions() {
                           {tx.groupName && !isExcluded && (
                             <span title={`Group: ${tx.groupName}`} style={{ fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, background: 'rgba(168,85,247,0.1)', color: '#a855f7', border: '1px solid rgba(168,85,247,0.25)', flexShrink: 0 }}>⊞ {tx.groupName}</span>
                           )}
-                          {tx.account && !isExcluded && (
+                          {columnVis.account && tx.account && !isExcluded && (
                             <span style={{ fontSize: 10, color: 'var(--text-3)', opacity: 0.55, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{tx.account}</span>
                           )}
-                          {(tx.tags ?? []).map((t) => (
+                          {columnVis.tags && (tx.tags ?? []).map((t) => (
                             <span key={t} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 10, fontWeight: 500, padding: '1px 4px 1px 6px', borderRadius: 99, background: 'rgba(91,87,245,0.1)', color: 'var(--accent)', border: '1px solid rgba(91,87,245,0.18)', flexShrink: 0 }}>
                               #{t}
                               <button onClick={(e) => { e.stopPropagation(); editTx(tx.id, { tags: (tx.tags ?? []).filter((x) => x !== t) }); }}
@@ -1784,6 +2195,12 @@ export default function Transactions() {
                           <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {tx.splitChildren.map((c, i) => <span key={i}>{i > 0 && ' · '}{c.category} {usd(c.amount)}</span>)}
                           </p>
+                        )}
+                        {columnVis.notes && tx.notes && (
+                          <p style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: 'italic' }}>{tx.notes}</p>
+                        )}
+                        {columnVis.originalDesc && tx.description !== displayStr && (
+                          <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.65 }} title={tx.description}>{tx.description}</p>
                         )}
                       </div>
 
@@ -1805,11 +2222,75 @@ export default function Transactions() {
           })}
         </div>
       )}
+      </>) : (
+        <CalendarView
+          filtered={filtered}
+          dateRange={dateRange}
+          categories={categories}
+          privacyMode={privacyMode}
+          onTxClick={(id) => { setSelectedId(id); setSelectedMerchant(null); }}
+        />
+      )}
 
       {showAdd && (
         <Modal title="Add transaction" onClose={() => setShowAdd(false)}>
           <TxForm categories={categories} onClose={() => setShowAdd(false)} onSave={(data) => { addTx(data as Omit<Transaction, 'id'>); setShowAdd(false); }} />
         </Modal>
+      )}
+
+      {colMenuOpen && colMenuRect && (
+        <>
+          <div onClick={() => setColMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 44 }} />
+          <div style={{ position: 'fixed', top: colMenuRect.bottom + 6, right: window.innerWidth - colMenuRect.right, zIndex: 45, background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, padding: '6px 4px', boxShadow: '0 8px 24px rgba(0,0,0,0.18)', minWidth: 195 }}>
+            <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-3)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 10px 6px' }}>Show in rows</p>
+            {([
+              ['account',     'Account'],
+              ['tags',        'Tags'],
+              ['notes',       'Notes'],
+              ['originalDesc','Original Description'],
+            ] as const).map(([key, label]) => (
+              <button key={key} onClick={() => toggleCol(key)}
+                style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '7px 10px', border: 'none', background: 'none', cursor: 'pointer', borderRadius: 6, color: 'var(--text-1)', textAlign: 'left', fontSize: 13 }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}>
+                <span style={{ width: 16, height: 16, borderRadius: 4, border: `1.5px solid ${columnVis[key] ? 'var(--accent)' : 'var(--border)'}`, background: columnVis[key] ? 'var(--accent)' : 'transparent', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.1s' }}>
+                  {columnVis[key] && <svg width={9} height={9} viewBox="0 0 14 14" fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d={IC.check} /></svg>}
+                </span>
+                {label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {ownerFilterOpen && ownerFilterRect && (
+        <>
+          <div onClick={() => setOwnerFilterOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 299 }} />
+          <div style={{ position: 'fixed', top: ownerFilterRect.bottom + 6, left: ownerFilterRect.left, zIndex: 300, background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, padding: '6px 4px', boxShadow: '0 8px 24px rgba(0,0,0,0.18)', minWidth: 160 }}>
+            <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-3)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 10px 6px' }}>Owner</p>
+            {(Object.entries(OWNERSHIP) as [OwnershipValue, typeof OWNERSHIP[OwnershipValue]][]).map(([key, cfg]) => (
+              <button key={key}
+                onClick={() => setOwnerFilters((p) => { const n = new Set(p); n.has(key) ? n.delete(key) : n.add(key); return n; })}
+                style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '7px 10px', border: 'none', background: 'none', cursor: 'pointer', borderRadius: 6, color: 'var(--text-1)', textAlign: 'left', fontSize: 13 }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}>
+                <span style={{ width: 16, height: 16, borderRadius: 4, border: `1.5px solid ${ownerFilters.has(key) ? cfg.color : 'var(--border)'}`, background: ownerFilters.has(key) ? cfg.color : 'transparent', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.1s' }}>
+                  {ownerFilters.has(key) && <svg width={9} height={9} viewBox="0 0 14 14" fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d={IC.check} /></svg>}
+                </span>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+                {cfg.label}
+              </button>
+            ))}
+            {ownerFilters.size > 0 && (
+              <button onClick={() => setOwnerFilters(new Set())}
+                style={{ width: '100%', marginTop: 4, padding: '5px 10px', border: 'none', background: 'none', cursor: 'pointer', borderRadius: 6, color: 'var(--text-3)', fontSize: 11, textAlign: 'center' }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--card-alt)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}>
+                Clear
+              </button>
+            )}
+          </div>
+        </>
       )}
 
       {catFilterOpen && catFilterRect && (
@@ -1856,6 +2337,15 @@ export default function Transactions() {
           onCategoryChanged={(desc, cat) => { setMerchantPrompt({ descs: [desc], cat }); recordCategorization(desc, cat); }}
           splitRules={splitRules} onCreateSplitRule={createSplitRule}
           onAttachmentsChanged={refreshAttachmentSet} />
+      )}
+
+      {selectedMerchant && (
+        <MerchantPanel
+          merchantName={selectedMerchant}
+          allTxs={allTxs}
+          onClose={() => setSelectedMerchant(null)}
+          privacyMode={privacyMode}
+        />
       )}
 
       {recurringPopover && (
